@@ -23,12 +23,24 @@ class TreePane(
     private val onOpen: (File) -> Unit,
     private val onRemoved: (File) -> Unit,
     private val onMore: () -> Unit,
+    private val onLesson: (longPress: Boolean) -> Unit,
 ) : LinearLayout(ctx) {
 
     var dir: File = store.root
     var selected: File? = null
 
     private var items: List<File> = emptyList()
+
+    /** Karte mit der laufenden/nächsten Unterrichtsstunde: Tippen öffnet den Fach-Ordner. */
+    private val card = TextView(ctx).apply {
+        textSize = 14f
+        setTextColor(Ui.ACCENT)
+        setBackgroundColor(Ui.SELECT)
+        setPadding(ctx.dp(16), ctx.dp(12), ctx.dp(16), ctx.dp(12))
+        visibility = GONE
+        setOnClickListener { onLesson(false) }
+        setOnLongClickListener { onLesson(true); true }
+    }
 
     private val search = EditText(ctx).apply {
         hint = "Titel suchen"
@@ -87,6 +99,7 @@ class TreePane(
         orientation = VERTICAL
         setBackgroundColor(0xFFFFFFFF.toInt())
 
+        addView(card, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         addView(search, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         addView(hairline(ctx, false))
         addView(path, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
@@ -123,6 +136,18 @@ class TreePane(
             override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
             override fun afterTextChanged(s: Editable?) = refresh()
         })
+        refresh()
+    }
+
+    fun setLesson(text: String?) {
+        card.text = text?.let { "$it  ›" }
+        card.visibility = if (text == null) GONE else VISIBLE
+    }
+
+    /** Springt in einen Ordner (leert die Suche). */
+    fun openDir(f: File) {
+        dir = f
+        search.setText("")
         refresh()
     }
 

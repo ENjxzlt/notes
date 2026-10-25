@@ -9,6 +9,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
@@ -26,6 +28,14 @@ class MainActivity : Activity() {
     private lateinit var editor: EditorPane
     private var wide = false
     private var started = false
+    private var currentLesson: SchoolPlan.Lesson? = null
+    private val handler = Handler(Looper.getMainLooper())
+    private val ticker = object : Runnable {
+        override fun run() {
+            updateCard()
+            handler.postDelayed(this, 60_000)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -36,6 +46,36 @@ class MainActivity : Activity() {
         super.onResume()
         // Zurück aus den Systemeinstellungen, in denen der Zugriff erlaubt wurde
         if (!started && hasAccess()) startApp()
+        if (started) startTicker()
+    }
+
+    private fun startTicker() {
+        handler.removeCallbacks(ticker)
+        handler.post(ticker)
+        if (SchoolPlan.isConnected(this)) SchoolPlan.refresh(this, onDone = ::updateCard)
+    }
+
+    private fun updateCard() {
+        if (!started) return
+        val next = if (SchoolPlan.isConnected(this)) SchoolPlan.upcoming(this) else null
+        currentLesson = next?.first
+        tree.setLesson(next?.let { SchoolPlan.label(it.first, it.second) })
+    }
+
+    /** Karte angetippt: Fach-Ordner öffnen; beim ersten Mal (oder langem Drücken) Ordner zuordnen. */
+    private fun onLessonCard(longPress: Boolean) {
+        val lesson = currentLesson ?: return
+        val folder = SchoolPlan.folderFor(this, store, lesson.subject)
+        if (longPress || folder == null) {
+            SchoolPlan.chooseFolder(this, store, lesson.subject) { openFolder(it) }
+        } else {
+            openFolder(folder)
+        }
+    }
+
+    private fun openFolder(f: File) {
+        tree.openDir(f)
+        if (!wide) showTree()
     }
 
     // ---- Speicherzugriff: Notizen liegen als normale Dateien im Ordner "Notizen" des Gerätespeichers ----
@@ -96,7 +136,7 @@ class MainActivity : Activity() {
         // Breites Tablet: Baum links, Editor rechts. Schmal: eins nach dem anderen.
         wide = resources.configuration.screenWidthDp >= 720
 
-        tree = TreePane(this, store, ::openNote, ::onRemoved, ::moreMenu)
+        tree = TreePane(this, store, ::openNote, ::onRemoved, ::moreMenu, ::onLessonCard)
         editor = EditorPane(this, store, showBack = !wide, onBack = ::showTree)
 
         val root = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -147,8 +187,8 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle("Notizen · Build ${Updater.installedVersion(this)}")
             .setMessage("Ordner: ${store.root.path}")
-            .setItems(arrayOf("Nach Updates suchen", "GitHub-Token für Updates")) { _, which ->
-                if (which == 0) Updater.check(this, manual = true) else Updater.askToken(this)
+            .setItems(arrayOf("Nach Updates suchen", "Stundenplan von Slotwise verbinden")) { _, which ->
+                if (which == 0) Updater.check(this, manual = true) else SchoolPlan.connect(this) { updateCard() }
             }
             .show()
     }
@@ -168,6 +208,7 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        handler.removeCallbacks(ticker)
         if (started) editor.flush()
         super.onPause()
     }

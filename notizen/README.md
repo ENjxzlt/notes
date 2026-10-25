@@ -11,6 +11,13 @@ Dateien“. Alte Notizen aus dem App-Speicher werden einmalig dorthin kopiert.
 - Tastatur: Strg+1/2/3 Überschrift, Strg+B Fett, Strg+I Kursiv, Strg+E Code; Enter setzt Aufzählungen fort,
   Enter auf leerem Punkt beendet die Liste
 
+## Stundenplan (Slotwise + vpmobil24)
+Slotwise holt den Plan von stundenplan24.de (Einstellungen → Kalender → Schulplan, Kursauswahl dort), zeigt ihn im
+Kalender, blockiert Zeit für den Planer und liefert ihn unter `/school/<Abo-Token>.json`. Die Notizen-App verbindet
+sich mit dem Slotwise-Abo-Link (Mehr → Stundenplan von Slotwise verbinden) und zeigt oben eine Karte mit laufender
+oder nächster Stunde. Tippen öffnet den Fach-Ordner (einmalig zuordnen, langes Drücken ändert die Zuordnung).
+Der Plan wird zwischengespeichert und funktioniert offline.
+
 ## Bauen
 GitHub Actions (`.github/workflows/notizen.yml`) baut bei jedem Push nach `notizen/**` und veröffentlicht die APK
 unter Releases (`notizen-<Nr>`). Die Signatur (`debug.keystore`, öffentlich bekanntes Standardpasswort) ist fest,
