@@ -7,6 +7,9 @@ on:
       - 'spike-ink/**'
       - '.github/workflows/spike-ink.yml'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -27,3 +30,12 @@ jobs:
           name: ink-spike-apk
           path: spike-ink/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 14
+      - name: APK als Release veröffentlichen (direkter Download, ohne ZIP)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp spike-ink/app/build/outputs/apk/debug/app-debug.apk ink-spike.apk
+          gh release create "spike-ink-${{ github.run_number }}" ink-spike.apk \
+            --target "${{ github.sha }}" --prerelease \
+            --title "Ink-Spike Build ${{ github.run_number }}" \
+            --notes "Debug-APK zum Testen auf dem Tablet."
