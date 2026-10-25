@@ -8,6 +8,7 @@ import android.text.InputType
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.widget.EditText
 import android.widget.HorizontalScrollView
@@ -234,12 +235,56 @@ class EditorPane(
     }
 }
 
-/** EditText, das Cursorbewegungen meldet. */
+/** EditText, das Cursorbewegungen meldet und Antippen von Aufgaben-Kästchen umschaltet. */
 private class NoteEdit(ctx: Context) : EditText(ctx) {
     var onSelection: (() -> Unit)? = null
+    private var pendingBox: MdCheckbox? = null
 
     override fun onSelectionChanged(selStart: Int, selEnd: Int) {
         super.onSelectionChanged(selStart, selEnd)
         onSelection?.invoke()
+    }
+
+    override fun onTouchEvent(ev: MotionEvent): Boolean {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                pendingBox = boxAt(ev.x, ev.y)
+                if (pendingBox != null) return true
+            }
+            MotionEvent.ACTION_UP -> {
+                val box = pendingBox
+                pendingBox = null
+                if (box != null) {
+                    if (boxAt(ev.x, ev.y) === box) toggle(box)
+                    return true
+                }
+            }
+            MotionEvent.ACTION_CANCEL -> pendingBox = null
+            else -> if (pendingBox != null) return true
+        }
+        return super.onTouchEvent(ev)
+    }
+
+    private fun boxAt(x: Float, y: Float): MdCheckbox? {
+        val l = layout ?: return null
+        val ed = text ?: return null
+        val line = l.getLineForVertical((y - totalPaddingTop + scrollY).toInt())
+        val from = l.getLineStart(line)
+        val to = l.getLineEnd(line)
+        val slop = context.dp(12)
+        for (sp in ed.getSpans(from, to, MdCheckbox::class.java)) {
+            val x0 = l.getPrimaryHorizontal(ed.getSpanStart(sp)) + totalPaddingLeft - scrollX
+            val x1 = l.getPrimaryHorizontal(ed.getSpanEnd(sp)) + totalPaddingLeft - scrollX
+            if (x >= x0 - slop && x <= x1 + slop) return sp
+        }
+        return null
+    }
+
+    /** "- [ ] " ⇄ "- [x] ": nur das Zeichen in der Klammer tauschen. */
+    private fun toggle(box: MdCheckbox) {
+        val ed = text ?: return
+        val s = ed.getSpanStart(box)
+        if (s < 0) return
+        ed.replace(s + 3, s + 4, if (box.checked) " " else "x")
     }
 }

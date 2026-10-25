@@ -3,6 +3,8 @@ package online.minihomelab.notizen
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.text.Editable
 import android.text.Spanned
@@ -23,6 +25,46 @@ class MdColor(c: Int) : ForegroundColorSpan(c), MdSpan
 class MdMono : TypefaceSpan("monospace"), MdSpan
 class MdBg(c: Int) : BackgroundColorSpan(c), MdSpan
 class MdStrike : StrikethroughSpan(), MdSpan
+
+/** Zeichnet "- [ ] " bzw. "- [x] " als echtes Kästchen (Antippen wechselt, siehe NoteEdit). */
+class MdCheckbox(val checked: Boolean) : ReplacementSpan(), MdSpan {
+    override fun getSize(paint: Paint, text: CharSequence?, start: Int, end: Int, fm: Paint.FontMetricsInt?): Int =
+        (paint.textSize * 1.3f).toInt()
+
+    override fun draw(
+        canvas: Canvas, text: CharSequence?, start: Int, end: Int,
+        x: Float, top: Int, y: Int, bottom: Int, paint: Paint,
+    ) {
+        val side = paint.textSize * 0.8f
+        val left = x + paint.textSize * 0.05f
+        val boxBottom = y - paint.textSize * 0.06f
+        val boxTop = boxBottom - side
+        val stroke = side * 0.11f
+        val radius = side * 0.2f
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        if (checked) {
+            p.style = Paint.Style.FILL
+            p.color = Ui.ACCENT
+            canvas.drawRoundRect(RectF(left, boxTop, left + side, boxBottom), radius, radius, p)
+            p.style = Paint.Style.STROKE
+            p.color = Color.WHITE
+            p.strokeWidth = stroke * 1.3f
+            p.strokeCap = Paint.Cap.ROUND
+            p.strokeJoin = Paint.Join.ROUND
+            val tick = Path()
+            tick.moveTo(left + side * 0.22f, boxTop + side * 0.52f)
+            tick.lineTo(left + side * 0.43f, boxTop + side * 0.72f)
+            tick.lineTo(left + side * 0.78f, boxTop + side * 0.28f)
+            canvas.drawPath(tick, p)
+        } else {
+            p.style = Paint.Style.STROKE
+            p.color = Ui.ACCENT
+            p.strokeWidth = stroke
+            val h = stroke / 2
+            canvas.drawRoundRect(RectF(left + h, boxTop + h, left + side - h, boxBottom - h), radius, radius, p)
+        }
+    }
+}
 
 /** Blendet Markdown-Zeichen aus: Breite 0, nichts gezeichnet. */
 class MdHide : ReplacementSpan(), MdSpan {
@@ -94,9 +136,14 @@ object MarkdownStyler {
         if (li != null) {
             val markerStart = pos + li.groupValues[1].length
             val markerEnd = pos + li.value.length
-            e.mark(MdColor(Ui.ACCENT), markerStart, markerEnd)
-            e.mark(MdBold(), markerStart, markerEnd)
-            if (li.groupValues[2].startsWith("- [") && li.groupValues[2][3] != ' ') {
+            val markerText = li.groupValues[2]
+            if (markerText.startsWith("- [")) {
+                e.mark(MdCheckbox(markerText[3] != ' '), markerStart, markerEnd)
+            } else {
+                e.mark(MdColor(Ui.ACCENT), markerStart, markerEnd)
+                e.mark(MdBold(), markerStart, markerEnd)
+            }
+            if (markerText.startsWith("- [") && markerText[3] != ' ') {
                 e.mark(MdStrike(), markerEnd, end)
                 e.mark(MdColor(GRAY), markerEnd, end)
             }
