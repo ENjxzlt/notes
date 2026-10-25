@@ -1,6 +1,7 @@
 package online.minihomelab.notizen
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -19,7 +20,7 @@ class MainActivity : Activity() {
         // Breites Tablet: Baum links, Editor rechts. Schmal: eins nach dem anderen.
         wide = resources.configuration.screenWidthDp >= 720
 
-        tree = TreePane(this, store, ::openNote, ::onRemoved)
+        tree = TreePane(this, store, ::openNote, ::onRemoved, ::moreMenu)
         editor = EditorPane(this, store, showBack = !wide, onBack = ::showTree)
 
         val root = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -33,6 +34,7 @@ class MainActivity : Activity() {
             editor.visibility = View.GONE
         }
         setContentView(root)
+        Updater.check(this)
 
         if (wide) {
             val last = getPreferences(MODE_PRIVATE).getString("last", null)?.let { File(it) }
@@ -52,6 +54,15 @@ class MainActivity : Activity() {
             tree.visibility = View.GONE
             editor.visibility = View.VISIBLE
         }
+    }
+
+    private fun moreMenu() {
+        AlertDialog.Builder(this)
+            .setTitle("Notizen · Build ${Updater.installedVersion(this)}")
+            .setItems(arrayOf("Nach Updates suchen", "GitHub-Token für Updates")) { _, which ->
+                if (which == 0) Updater.check(this, manual = true) else Updater.askToken(this)
+            }
+            .show()
     }
 
     private fun showTree() {

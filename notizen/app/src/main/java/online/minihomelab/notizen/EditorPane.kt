@@ -35,6 +35,8 @@ class EditorPane(
     private var loading = false
     private var busy = false
     private var enterAt = -1
+    private var styledStart = -1
+    private var styledEnd = -1
 
     private val title = TextView(ctx).apply {
         textSize = 14f
@@ -51,7 +53,7 @@ class EditorPane(
         textSize = 15f
         gravity = Gravity.CENTER
     }
-    private val edit = EditText(ctx).apply {
+    private val edit = NoteEdit(ctx).apply {
         inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
             InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         gravity = Gravity.TOP or Gravity.START
@@ -101,13 +103,16 @@ class EditorPane(
                         val cursor = MarkdownStyler.continueList(e, at)
                         if (cursor >= 0) edit.setSelection(cursor)
                     }
-                    MarkdownStyler.apply(e)
+                    applyStyle(e)
                 } finally {
                     busy = false
                 }
                 if (!loading) scheduleSave()
             }
         })
+
+        // Cursor bewegt: Markdown-Zeichen im aktuellen Wort/Zeile ein-, anderswo ausblenden (verzögert, nie mitten im Tippen)
+        edit.onSelection = { edit.post { restyle() } }
 
         edit.setOnKeyListener { _, code, ev ->
             if (ev.action != KeyEvent.ACTION_DOWN || !ev.isCtrlPressed) return@setOnKeyListener false
@@ -122,6 +127,23 @@ class EditorPane(
             }
         }
         showEmpty()
+    }
+
+    private fun applyStyle(e: Editable) {
+        styledStart = maxOf(0, edit.selectionStart)
+        styledEnd = maxOf(0, edit.selectionEnd)
+        MarkdownStyler.apply(e, styledStart, styledEnd)
+    }
+
+    private fun restyle() {
+        if (busy || loading || file == null) return
+        if (maxOf(0, edit.selectionStart) == styledStart && maxOf(0, edit.selectionEnd) == styledEnd) return
+        busy = true
+        try {
+            applyStyle(edit.text)
+        } finally {
+            busy = false
+        }
     }
 
     private fun buildToolbar(ctx: Context): View {
@@ -209,5 +231,15 @@ class EditorPane(
         } catch (e: Exception) {
             status.text = "Speichern fehlgeschlagen"
         }
+    }
+}
+
+/** EditText, das Cursorbewegungen meldet. */
+private class NoteEdit(ctx: Context) : EditText(ctx) {
+    var onSelection: (() -> Unit)? = null
+
+    override fun onSelectionChanged(selStart: Int, selEnd: Int) {
+        super.onSelectionChanged(selStart, selEnd)
+        onSelection?.invoke()
     }
 }

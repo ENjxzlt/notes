@@ -22,6 +22,7 @@ class TreePane(
     private val store: NoteStore,
     private val onOpen: (File) -> Unit,
     private val onRemoved: (File) -> Unit,
+    private val onMore: () -> Unit,
 ) : LinearLayout(ctx) {
 
     var dir: File = store.root
@@ -98,6 +99,7 @@ class TreePane(
             orientation = HORIZONTAL
             addView(flatButton(ctx, "Neue Notiz") { newNote() }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
             addView(flatButton(ctx, "Neuer Ordner") { newFolder() }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+            addView(flatButton(ctx, "Mehr") { onMore() }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
         }
         addView(buttons, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
 

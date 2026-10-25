@@ -1,12 +1,15 @@
 package online.minihomelab.notizen
 
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Typeface
 import android.text.Editable
 import android.text.Spanned
 import android.text.style.BackgroundColorSpan
 import android.text.style.ForegroundColorSpan
 import android.text.style.RelativeSizeSpan
+import android.text.style.ReplacementSpan
 import android.text.style.StrikethroughSpan
 import android.text.style.StyleSpan
 import android.text.style.TypefaceSpan
@@ -21,9 +24,20 @@ class MdMono : TypefaceSpan("monospace"), MdSpan
 class MdBg(c: Int) : BackgroundColorSpan(c), MdSpan
 class MdStrike : StrikethroughSpan(), MdSpan
 
+/** Blendet Markdown-Zeichen aus: Breite 0, nichts gezeichnet. */
+class MdHide : ReplacementSpan(), MdSpan {
+    override fun getSize(paint: Paint, text: CharSequence?, start: Int, end: Int, fm: Paint.FontMetricsInt?): Int = 0
+    override fun draw(
+        canvas: Canvas, text: CharSequence?, start: Int, end: Int,
+        x: Float, top: Int, y: Int, bottom: Int, paint: Paint,
+    ) {
+    }
+}
+
 /**
  * Gespeichert wird reines Markdown. Im Editor werden die Zeichen nur optisch gestaltet:
- * Überschriften groß, Aufzählungszeichen farbig, Markierungszeichen ausgegraut.
+ * Überschriften groß, Aufzählungszeichen farbig. Markierungszeichen (#, **, *, `) sind ausgeblendet und
+ * erscheinen grau, solange der Cursor in der Überschrift-Zeile bzw. im Wort steht.
  */
 object MarkdownStyler {
     private val GRAY = Color.rgb(0x9A, 0xA0, 0xA6)
@@ -41,7 +55,7 @@ object MarkdownStyler {
         if (e > s) setSpan(span, s, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
     }
 
-    fun apply(e: Editable) {
+    fun apply(e: Editable, selStart: Int, selEnd: Int) {
         for (s in e.getSpans(0, e.length, MdSpan::class.java)) e.removeSpan(s)
         val text = e.toString()
         var pos = 0
@@ -59,19 +73,20 @@ object MarkdownStyler {
                 e.mark(MdMono(), pos, end)
                 e.mark(MdBg(CODE_BG), pos, end)
             } else {
-                styleLine(e, line, pos, end)
+                styleLine(e, line, pos, end, selStart, selEnd)
             }
             pos = end + 1
         }
     }
 
-    private fun styleLine(e: Editable, line: String, pos: Int, end: Int) {
+    private fun styleLine(e: Editable, line: String, pos: Int, end: Int, selStart: Int, selEnd: Int) {
         val h = heading.find(line)
         if (h != null) {
             val level = h.groupValues[1].length
             e.mark(MdSize(SIZES[level - 1]), pos, end)
             e.mark(MdBold(), pos, end)
-            e.mark(MdColor(GRAY), pos, pos + h.value.length)
+            val active = selStart <= end && selEnd >= pos
+            e.mark(if (active) MdColor(GRAY) else MdHide(), pos, pos + h.value.length)
             return
         }
         var contentStart = pos
@@ -87,31 +102,35 @@ object MarkdownStyler {
             }
             contentStart = markerEnd
         }
-        inline(e, line.substring(contentStart - pos), contentStart)
+        inline(e, line.substring(contentStart - pos), contentStart, selStart, selEnd)
     }
 
-    private fun inline(e: Editable, text: String, offset: Int) {
+    private fun inline(e: Editable, text: String, offset: Int, selStart: Int, selEnd: Int) {
+        fun marker(touching: Boolean): Any = if (touching) MdColor(GRAY) else MdHide()
         for (m in bold.findAll(text)) {
             val s = offset + m.range.first
             val t = offset + m.range.last + 1
             e.mark(MdBold(), s, t)
-            e.mark(MdColor(GRAY), s, s + 2)
-            e.mark(MdColor(GRAY), t - 2, t)
+            val touch = selStart <= t && selEnd >= s
+            e.mark(marker(touch), s, s + 2)
+            e.mark(marker(touch), t - 2, t)
         }
         for (m in italic.findAll(text)) {
             val s = offset + m.range.first
             val t = offset + m.range.last + 1
             e.mark(MdItalic(), s, t)
-            e.mark(MdColor(GRAY), s, s + 1)
-            e.mark(MdColor(GRAY), t - 1, t)
+            val touch = selStart <= t && selEnd >= s
+            e.mark(marker(touch), s, s + 1)
+            e.mark(marker(touch), t - 1, t)
         }
         for (m in code.findAll(text)) {
             val s = offset + m.range.first
             val t = offset + m.range.last + 1
             e.mark(MdMono(), s, t)
             e.mark(MdBg(CODE_BG), s, t)
-            e.mark(MdColor(GRAY), s, s + 1)
-            e.mark(MdColor(GRAY), t - 1, t)
+            val touch = selStart <= t && selEnd >= s
+            e.mark(marker(touch), s, s + 1)
+            e.mark(marker(touch), t - 1, t)
         }
     }
 
