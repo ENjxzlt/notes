@@ -49,7 +49,7 @@ Regeln nötig für: Freistunde, Vertretung, Doppelstunde, Klausurtag, kein passe
 
 ## Meilensteine
 0. Eine Woche Obsidian (zweiter Vault) + Excalidraw im Schulalltag, Samsung Notes als Rückfall; Mängel notieren
-1. Spike: Zeichenfläche in Kotlin, S-Pen-Latenz und Palm Rejection. Fühlt es sich nicht besser an als Samsung Notes → Technik überdenken
+1. Spike: Zeichenfläche in Kotlin, S-Pen-Latenz und Palm Rejection. **Bestanden (2026-10-25): Stiftgefühl auf dem Tablet sehr gut**, einfache `View` ohne `androidx.graphics` reicht vorerst. Offen: Palm-Rejection-Test mit Handballen, Lasso
 2. Lokale V1 nur für Schule: Markdown-Editor, Ordnerbaum, Titelsuche, ein Zeichenblock je Notiz, Stundenplan-Öffnen
 3. Server-Sync: Revisionsnummer je Datei, Konflikt = Kopie mit Zeitstempel, nie stillschweigend überschreiben; automatisches Backup
 4. Claude-Zugriff: Remote-MCP mit Authentifizierung, Versionen mit Rückgängig; Vorschlagsmodus bei offener Notiz
