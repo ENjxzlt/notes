@@ -1,11 +1,23 @@
 package online.minihomelab.notizen
 
+import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.TextView
+import android.widget.Toast
 import java.io.File
 
 class MainActivity : Activity() {
@@ -13,10 +25,74 @@ class MainActivity : Activity() {
     private lateinit var tree: TreePane
     private lateinit var editor: EditorPane
     private var wide = false
+    private var started = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        store = NoteStore(File(filesDir, "notizen"))
+        if (hasAccess()) startApp() else showAccessScreen()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Zurück aus den Systemeinstellungen, in denen der Zugriff erlaubt wurde
+        if (!started && hasAccess()) startApp()
+    }
+
+    // ---- Speicherzugriff: Notizen liegen als normale Dateien im Ordner "Notizen" des Gerätespeichers ----
+
+    private fun hasAccess(): Boolean =
+        if (Build.VERSION.SDK_INT >= 30) Environment.isExternalStorageManager()
+        else checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+
+    private fun requestAccess() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))
+        } else {
+            requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), 1)
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (!started && hasAccess()) startApp()
+    }
+
+    private fun showAccessScreen() {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(32), dp(32), dp(32), dp(32))
+            setBackgroundColor(0xFFFFFFFF.toInt())
+        }
+        box.addView(TextView(this).apply {
+            text = "Zugriff auf den Gerätespeicher"
+            textSize = 20f
+            setTextColor(Ui.TEXT)
+            gravity = Gravity.CENTER
+        })
+        box.addView(TextView(this).apply {
+            text = "Deine Notizen liegen als normale .md-Dateien im Ordner „Notizen“ im Gerätespeicher. " +
+                "Sie bleiben beim Deinstallieren erhalten und lassen sich mit anderen Apps nutzen " +
+                "(Dateien, Syncthing, Termux). Dafür braucht die App Zugriff auf alle Dateien."
+            textSize = 15f
+            setTextColor(Ui.MUTED)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(16), 0, dp(24))
+        }, LinearLayout.LayoutParams(dp(480), WRAP_CONTENT))
+        box.addView(Button(this).apply {
+            text = "Zugriff erlauben"
+            isAllCaps = false
+            setOnClickListener { requestAccess() }
+        })
+        setContentView(box)
+    }
+
+    // ---- App ----
+
+    private fun startApp() {
+        started = true
+        store = NoteStore(File(Environment.getExternalStorageDirectory(), "Notizen"))
+        migrateOldNotes()
         // Breites Tablet: Baum links, Editor rechts. Schmal: eins nach dem anderen.
         wide = resources.configuration.screenWidthDp >= 720
 
@@ -45,6 +121,17 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Frühere Versionen speicherten im App-Speicher (filesDir/notizen): einmalig in den Ordner kopieren. */
+    private fun migrateOldNotes() {
+        val old = File(filesDir, "notizen")
+        if (!old.isDirectory) return
+        val hadNotes = old.walkTopDown().any { it.isFile && it.extension == "md" }
+        old.copyRecursively(store.root, overwrite = false) { _, _ -> kotlin.io.OnErrorAction.SKIP }
+        // Als Sicherheitskopie im App-Speicher stehen lassen, aber nicht nochmal kopieren
+        old.renameTo(File(filesDir, "notizen-migriert"))
+        if (hadNotes) Toast.makeText(this, "Notizen in den Ordner „Notizen“ verschoben", Toast.LENGTH_LONG).show()
+    }
+
     private fun openNote(f: File) {
         editor.open(f)
         tree.selected = f
@@ -59,6 +146,7 @@ class MainActivity : Activity() {
     private fun moreMenu() {
         AlertDialog.Builder(this)
             .setTitle("Notizen · Build ${Updater.installedVersion(this)}")
+            .setMessage("Ordner: ${store.root.path}")
             .setItems(arrayOf("Nach Updates suchen", "GitHub-Token für Updates")) { _, which ->
                 if (which == 0) Updater.check(this, manual = true) else Updater.askToken(this)
             }
@@ -80,13 +168,16 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
-        editor.flush()
+        if (started) editor.flush()
         super.onPause()
     }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (!wide && editor.visibility == View.VISIBLE) {
+        if (!started) {
+            @Suppress("DEPRECATION")
+            super.onBackPressed()
+        } else if (!wide && editor.visibility == View.VISIBLE) {
             showTree()
         } else if (!tree.goUp()) {
             @Suppress("DEPRECATION")

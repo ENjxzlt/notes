@@ -1,7 +1,8 @@
 # Notizen-App (Meilenstein 2, Schritte 1+2)
 
-Kotlin, nur Android-Framework. Notizen liegen als `.md`-Dateien in `filesDir/notizen/` (Schule, Projekte, Alltag
-werden angelegt).
+Kotlin, nur Android-Framework. Notizen liegen als normale `.md`-Dateien im Ordner `Notizen` des Gerätespeichers
+(`/storage/emulated/0/Notizen`; Schule, Projekte, Alltag werden angelegt). Dafür braucht die App „Zugriff auf alle
+Dateien“. Alte Notizen aus dem App-Speicher werden einmalig dorthin kopiert.
 
 - Ordnerbaum (Tippen = öffnen, lange drücken = umbenennen/löschen), Titelsuche über alle Ordner
 - Tablet breit: Baum links, Editor rechts; schmal: nacheinander
@@ -16,4 +17,4 @@ unter Releases (`notizen-<Nr>`). Die Signatur (`debug.keystore`, öffentlich bek
 damit neue Builds über alte installiert werden können, ohne dass Notizen verloren gehen.
 
 ## Noch nicht
-Zeichenblock in Notizen, Stundenplan, Sync, Backup. **Notizen liegen nur im App-Speicher: Deinstallieren löscht sie.**
+Zeichenblock in Notizen, Stundenplan, Sync, Backup. Deinstallieren löscht die Notizen nicht mehr, einen Papierkorb gibt es noch nicht.

@@ -7,7 +7,10 @@ class NoteStore(val root: File) {
 
     init {
         root.mkdirs()
-        for (n in listOf("Schule", "Projekte", "Alltag")) File(root, n).mkdirs()
+        // Nur in einen ganz leeren Ordner Startordner legen, sonst kämen gelöschte immer wieder
+        if (root.list().isNullOrEmpty()) {
+            for (n in listOf("Schule", "Projekte", "Alltag")) File(root, n).mkdirs()
+        }
     }
 
     fun list(dir: File): List<File> =
