@@ -86,7 +86,7 @@ class EditorPane(
     private var lastInkTool = "pen"
     private var lastInkColor = "text"
     private val inkSave = Runnable { saveInk() }
-    private val inkTools = InkTools(
+    private val inkTools: InkTools = InkTools(
         ctx,
         onTool = { t -> lastInkTool = t; inkModel?.tool = t; overlayModel?.tool = t; syncInkTools() },
         onColor = { c -> lastInkColor = c; inkModel?.color = c; overlayModel?.color = c; syncInkTools() },
@@ -351,7 +351,9 @@ class EditorPane(
         updateInkTools()
     }
 
-    private fun syncInkTools() = inkTools.sync(lastInkTool, lastInkColor)
+    private fun syncInkTools() {
+        inkTools.sync(lastInkTool, lastInkColor)
+    }
 
     /** Leiste zeigen, solange der Stift zeichnen darf oder ein Block aktiv ist. */
     private fun updateInkTools() {
