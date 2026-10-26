@@ -34,10 +34,13 @@ class MainActivity : Activity() {
     private var inkDir: File? = null
     private var inkId: String? = null
     private var currentLesson: SchoolPlan.Lesson? = null
+    private var tick = 0
+    private val syncRunnable = Runnable { syncNow(false) }
     private val handler = Handler(Looper.getMainLooper())
     private val ticker = object : Runnable {
         override fun run() {
             updateCard()
+            if (++tick % 5 == 0) syncNow(false) // alle 5 Minuten
             handler.postDelayed(this, 60_000)
         }
     }
@@ -59,6 +62,25 @@ class MainActivity : Activity() {
         handler.removeCallbacks(ticker)
         handler.post(ticker)
         if (SchoolPlan.isConnected(this)) SchoolPlan.refresh(this, onDone = ::updateCard)
+        syncNow(false)
+    }
+
+    /** Notizen mit dem Server abgleichen; nach dem Speichern verzögert, damit nicht jeder Tastendruck zählt. */
+    private fun syncNow(manual: Boolean) {
+        if (!started || !Sync.isConnected(this)) return
+        editor.flush()
+        Sync.run(this, store) { res ->
+            tree.refresh()
+            editor.reloadIfChanged()
+            if (manual) {
+                Toast.makeText(this, if (res.error != null) "Sync fehlgeschlagen: ${res.error}" else Sync.lastStatus(this), Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun scheduleSync() {
+        handler.removeCallbacks(syncRunnable)
+        handler.postDelayed(syncRunnable, 8_000)
     }
 
     private fun updateCard() {
@@ -153,6 +175,7 @@ class MainActivity : Activity() {
             root.addView(editor, LinearLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
             editor.visibility = View.GONE
         }
+        editor.onSaved = { scheduleSync() }
         frame = FrameLayout(this)
         frame.addView(root, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         setContentView(frame)
@@ -220,21 +243,21 @@ class MainActivity : Activity() {
     }
 
     private fun moreMenu() {
+        val items = ArrayList<String>()
+        val actions = ArrayList<() -> Unit>()
+        fun add(label: String, action: () -> Unit) {
+            items.add(label)
+            actions.add(action)
+        }
+        add("Nach Updates suchen") { Updater.check(this, manual = true) }
+        add("Stundenplan von Slotwise verbinden") { SchoolPlan.connect(this) { updateCard() } }
+        add("Notizen-Server verbinden") { Sync.configure(this) { syncNow(true) } }
+        if (Sync.isConnected(this)) add("Jetzt synchronisieren (${Sync.lastStatus(this)})") { syncNow(true) }
+        add("Ordner: ${store.root.path}") {}
         // Achtung: setMessage und setItems schließen sich in AlertDialog aus (die Einträge würden nicht angezeigt)
         AlertDialog.Builder(this)
             .setTitle("Notizen · Build ${Updater.installedVersion(this)}")
-            .setItems(
-                arrayOf(
-                    "Nach Updates suchen",
-                    "Stundenplan von Slotwise verbinden",
-                    "Ordner: ${store.root.path}",
-                ),
-            ) { _, which ->
-                when (which) {
-                    0 -> Updater.check(this, manual = true)
-                    1 -> SchoolPlan.connect(this) { updateCard() }
-                }
-            }
+            .setItems(items.toTypedArray()) { _, which -> actions[which]() }
             .show()
     }
 
