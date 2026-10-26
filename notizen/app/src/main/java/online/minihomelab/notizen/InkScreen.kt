@@ -15,24 +15,144 @@ import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import kotlin.math.hypot
+
+/** Farbpunkt mit Ring, wenn ausgewählt. */
+class InkColorDot(c: Context, val key: String) : View(c) {
+    var selectedDot = false
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    override fun onDraw(canvas: Canvas) {
+        val cx = width / 2f
+        val cy = height / 2f
+        p.style = Paint.Style.FILL
+        p.color = Ink.resolve(key)
+        canvas.drawCircle(cx, cy, context.dp(10).toFloat(), p)
+        if (selectedDot) {
+            p.style = Paint.Style.STROKE
+            p.strokeWidth = context.dp(2).toFloat()
+            p.color = Ui.ACCENT
+            canvas.drawCircle(cx, cy, context.dp(15).toFloat(), p)
+        }
+    }
+}
+
+val INK_COLORS = listOf("text", "#1d4ed8", "#d12b2b", "#16a34a", "#e8b400")
 
 /**
- * Zeichenfläche: nur der Stift zeichnet (Finger scrollt = einfache Palm Rejection), die Strichstärke folgt dem Druck,
- * die Stifttaste (S Pen) radiert, solange sie gedrückt ist. Koordinaten sind Seiteneinheiten (Breite = Ink.W).
+ * Werkzeugleiste fürs Zeichnen direkt in der Notiz: Stift, Textmarker, Radierer, Farben, Rückgängig,
+ * Seite verlängern, Vollbild und Fertig.
+ */
+class InkTools(
+    ctx: Context,
+    private val onTool: (String) -> Unit,
+    private val onColor: (String) -> Unit,
+    private val onUndo: () -> Unit,
+    private val onExtend: () -> Unit,
+    private val onFull: () -> Unit,
+    private val onDone: () -> Unit,
+    private val isInline: Boolean,
+) : HorizontalScrollView(ctx) {
+
+    private val toolSetters = HashMap<String, (Boolean) -> Unit>()
+    private val dots = ArrayList<InkColorDot>()
+
+    /** Nur im Vollbild: ob mit dem Finger gezeichnet wird (für die Anzeige des Schalters). */
+    var fingerOn: () -> Boolean = { false }
+
+    init {
+        isHorizontalScrollBarEnabled = false
+        setBackgroundColor(Ui.SURFACE)
+        val row = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(ctx.dp(16), 0, ctx.dp(16), 0)
+        }
+
+        fun toolButton(key: String, res: Int, desc: String) {
+            val iv = ImageView(ctx).apply {
+                setImageResource(res)
+                scaleType = ImageView.ScaleType.CENTER
+                contentDescription = desc
+                isClickable = true
+                setOnClickListener { onTool(key) }
+            }
+            toolSetters[key] = { on ->
+                iv.setColorFilter(if (on) Ui.ACCENT else Ui.TEXT2)
+                iv.background = Ui.ripple(ctx, if (on) Ui.round(ctx, Ui.ACCENT_SOFT, 8) else null, 8)
+            }
+            row.addView(iv, LinearLayout.LayoutParams(ctx.dp(44), ctx.dp(44)))
+        }
+
+        fun divider() {
+            row.addView(View(ctx).apply { setBackgroundColor(Ui.BORDER) }, LinearLayout.LayoutParams(1, ctx.dp(24)).apply {
+                leftMargin = ctx.dp(8)
+                rightMargin = ctx.dp(8)
+            })
+        }
+
+        toolButton("pen", R.drawable.ic_pen, "Stift")
+        toolButton("marker", R.drawable.ic_marker, "Textmarker")
+        toolButton("eraser", R.drawable.ic_eraser, "Radierer")
+        divider()
+        for (key in INK_COLORS) {
+            val dot = InkColorDot(ctx, key).apply {
+                isClickable = true
+                contentDescription = "Farbe"
+                setOnClickListener { onColor(key) }
+            }
+            dots.add(dot)
+            row.addView(dot, LinearLayout.LayoutParams(ctx.dp(40), ctx.dp(44)))
+        }
+        divider()
+        row.addView(Ui.iconButton(ctx, R.drawable.ic_undo, "Rückgängig", false) { onUndo() }, LinearLayout.LayoutParams(ctx.dp(44), ctx.dp(44)))
+        row.addView(Ui.iconButton(ctx, R.drawable.ic_plus, "Seite verlängern", false) { onExtend() }, LinearLayout.LayoutParams(ctx.dp(44), ctx.dp(44)))
+        if (isInline) {
+            row.addView(Ui.iconButton(ctx, R.drawable.ic_expand, "Vollbild", false) { onFull() }, LinearLayout.LayoutParams(ctx.dp(44), ctx.dp(44)))
+            row.addView(Ui.label(ctx, "Fertig", 14f, Ui.ACCENT, Ui.sansMedium).apply {
+                gravity = Gravity.CENTER
+                setPadding(ctx.dp(14), 0, ctx.dp(14), 0)
+                isClickable = true
+                background = Ui.ripple(ctx, null, 8)
+                setOnClickListener { onDone() }
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, ctx.dp(44)))
+        } else {
+            // Vollbild: für Geräte ohne Stift mit dem Finger zeichnen (dann scrollt der Finger nicht mehr)
+            val finger = Ui.label(ctx, "Finger", 14f, Ui.TEXT2).apply {
+                gravity = Gravity.CENTER
+                setPadding(ctx.dp(12), 0, ctx.dp(12), 0)
+                isClickable = true
+                background = Ui.ripple(ctx, null, 8)
+            }
+            finger.setOnClickListener {
+                onFull()
+                val on = fingerOn()
+                finger.setTextColor(if (on) Ui.ACCENT else Ui.TEXT2)
+                finger.background = Ui.ripple(ctx, if (on) Ui.round(ctx, Ui.ACCENT_SOFT, 8) else null, 8)
+            }
+            row.addView(finger, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, ctx.dp(44)))
+        }
+
+        addView(row, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.MATCH_PARENT))
+    }
+
+    fun sync(tool: String, color: String) {
+        for ((k, set) in toolSetters) set(k == tool)
+        for (d in dots) {
+            d.selectedDot = d.key == color
+            d.invalidate()
+        }
+    }
+}
+
+/**
+ * Vollbild-Zeichenfläche: nur der Stift zeichnet (Finger scrollt = einfache Palm Rejection), die Strichstärke folgt
+ * dem Druck, die Stifttaste (S Pen) radiert, solange sie gedrückt ist. Koordinaten sind Seiteneinheiten (Breite = Ink.W).
  */
 class DrawView(ctx: Context, val doc: InkDoc) : View(ctx) {
-    var tool = "pen" // pen, marker, eraser
-    var color = "text"
+    val model = InkModel(doc)
     var fingerDraws = false
 
-    private class Op(val added: InkStroke?, val removed: List<Pair<Int, InkStroke>>)
-
-    private val ops = ArrayList<Op>()
-    private var current: InkStroke? = null
     private var activePointer = -1
-    private var erasing = false
-    private var erasedNow = ArrayList<Pair<Int, InkStroke>>()
     private var bitmap: Bitmap? = null
     private var bitmapCanvas: Canvas? = null
 
@@ -51,11 +171,10 @@ class DrawView(ctx: Context, val doc: InkDoc) : View(ctx) {
     }
 
     fun undo() {
-        val op = ops.removeLastOrNull() ?: return
-        op.added?.let { doc.strokes.remove(it) }
-        for ((i, s) in op.removed.sortedBy { it.first }) doc.strokes.add(minOf(i, doc.strokes.size), s)
-        rebuild()
-        invalidate()
+        if (model.undo()) {
+            rebuild()
+            invalidate()
+        }
     }
 
     fun extend() {
@@ -70,24 +189,7 @@ class DrawView(ctx: Context, val doc: InkDoc) : View(ctx) {
         for (s in doc.strokes) Ink.drawStroke(c, s, scale)
     }
 
-    private fun eraseAt(x: Float, y: Float) {
-        val radius = 14f
-        var changed = false
-        var i = doc.strokes.size - 1
-        while (i >= 0) {
-            val s = doc.strokes[i]
-            if (s.pts.any { hypot(it[0] - x, it[1] - y) < radius }) {
-                erasedNow.add(Pair(i, s))
-                doc.strokes.removeAt(i)
-                changed = true
-            }
-            i--
-        }
-        if (changed) {
-            rebuild()
-            invalidate()
-        }
-    }
+    private fun pressure(e: MotionEvent, i: Int, type: Int) = if (type == MotionEvent.TOOL_TYPE_FINGER) 0.5f else e.getPressure(i)
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         val sc = scale
@@ -103,17 +205,8 @@ class DrawView(ctx: Context, val doc: InkDoc) : View(ctx) {
                 requestUnbufferedDispatch(event) // keine Bündelung der Ereignisse = geringere Latenz
                 parent?.requestDisallowInterceptTouchEvent(true)
                 val button = (event.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
-                erasing = type == MotionEvent.TOOL_TYPE_ERASER || button || tool == "eraser"
-                val x = event.getX(i) / sc
-                val y = event.getY(i) / sc
-                if (erasing) {
-                    erasedNow = ArrayList()
-                    eraseAt(x, y)
-                } else {
-                    val s = InkStroke(tool, color)
-                    s.pts.add(floatArrayOf(x, y, pressure(event, i, type)))
-                    current = s
-                }
+                val changed = model.down(event.getX(i) / sc, event.getY(i) / sc, pressure(event, i, type), type == MotionEvent.TOOL_TYPE_ERASER || button)
+                if (changed) rebuild()
                 invalidate()
             }
 
@@ -121,72 +214,61 @@ class DrawView(ctx: Context, val doc: InkDoc) : View(ctx) {
                 val i = event.findPointerIndex(activePointer)
                 if (i == -1) return true
                 val type = event.getToolType(i)
-                if (erasing) {
-                    for (h in 0 until event.historySize) eraseAt(event.getHistoricalX(i, h) / sc, event.getHistoricalY(i, h) / sc)
-                    eraseAt(event.getX(i) / sc, event.getY(i) / sc)
+                val r = Rect()
+                val pad = 40
+                var erased = false
+                fun grow(px: Float, py: Float) {
+                    val ix = px.toInt()
+                    val iy = py.toInt()
+                    if (r.isEmpty) r.set(ix - pad, iy - pad, ix + pad, iy + pad) else r.union(ix - pad, iy - pad, ix + pad, iy + pad)
+                }
+                // Alle gebündelten Zwischenpunkte übernehmen, sonst wird die Linie eckig
+                for (h in 0 until event.historySize) {
+                    val hx = event.getHistoricalX(i, h)
+                    val hy = event.getHistoricalY(i, h)
+                    val p = if (type == MotionEvent.TOOL_TYPE_FINGER) 0.5f else event.getHistoricalPressure(i, h)
+                    if (model.move(hx / sc, hy / sc, p)) erased = true
+                    grow(hx, hy)
+                }
+                if (model.move(event.getX(i) / sc, event.getY(i) / sc, pressure(event, i, type))) erased = true
+                grow(event.getX(i), event.getY(i))
+                if (erased) {
+                    rebuild()
+                    invalidate()
                 } else {
-                    val s = current ?: return true
-                    val r = Rect()
-                    val pad = 40
-                    fun grow(px: Float, py: Float) {
-                        val ix = px.toInt()
-                        val iy = py.toInt()
-                        if (r.isEmpty) r.set(ix - pad, iy - pad, ix + pad, iy + pad) else r.union(ix - pad, iy - pad, ix + pad, iy + pad)
-                    }
-                    // Alle gebündelten Zwischenpunkte übernehmen, sonst wird die Linie eckig
-                    for (h in 0 until event.historySize) {
-                        val hx = event.getHistoricalX(i, h)
-                        val hy = event.getHistoricalY(i, h)
-                        s.pts.add(floatArrayOf(hx / sc, hy / sc, if (type == MotionEvent.TOOL_TYPE_FINGER) 0.5f else event.getHistoricalPressure(i, h)))
-                        grow(hx, hy)
-                    }
-                    s.pts.add(floatArrayOf(event.getX(i) / sc, event.getY(i) / sc, pressure(event, i, type)))
-                    grow(event.getX(i), event.getY(i))
                     invalidate(r)
                 }
             }
 
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
                 val i = event.actionIndex
-                if (event.getPointerId(i) == activePointer) finish()
+                if (event.getPointerId(i) == activePointer) {
+                    val stroke = model.current
+                    if (model.up()) {
+                        if (model.lastWasErase) rebuild() else stroke?.let { s -> bitmapCanvas?.let { c -> Ink.drawStroke(c, s, scale) } }
+                    }
+                    activePointer = -1
+                    invalidate()
+                }
             }
 
             MotionEvent.ACTION_CANCEL -> {
                 // Das System hat die Berührung als Handballen erkannt: Strich verwerfen
-                current = null
+                model.cancel()
                 activePointer = -1
-                erasing = false
                 invalidate()
             }
         }
         return true
     }
 
-    private fun pressure(e: MotionEvent, i: Int, type: Int) = if (type == MotionEvent.TOOL_TYPE_FINGER) 0.5f else e.getPressure(i)
-
-    private fun finish() {
-        if (erasing) {
-            if (erasedNow.isNotEmpty()) ops.add(Op(null, erasedNow))
-        } else {
-            current?.let {
-                doc.strokes.add(it)
-                ops.add(Op(it, emptyList()))
-                bitmapCanvas?.let { c -> Ink.drawStroke(c, it, scale) }
-            }
-        }
-        current = null
-        activePointer = -1
-        erasing = false
-        invalidate()
-    }
-
     override fun onDraw(canvas: Canvas) {
         bitmap?.let { canvas.drawBitmap(it, 0f, 0f, null) }
-        current?.let { Ink.drawStroke(canvas, it, scale) }
+        model.current?.let { Ink.drawStroke(canvas, it, scale) }
     }
 }
 
-/** Vollbild-Zeichnen: oben Fertig/Löschen, in der Mitte die Seite, unten Werkzeuge und Farben. */
+/** Vollbild-Zeichnen: oben Fertig/Löschen, in der Mitte die Seite, unten die Werkzeuge. */
 class InkScreen(
     ctx: Context,
     val doc: InkDoc,
@@ -195,28 +277,7 @@ class InkScreen(
 ) : LinearLayout(ctx) {
 
     private val draw = DrawView(ctx, doc)
-    private val toolSetters = HashMap<String, (Boolean) -> Unit>()
-    private val colorDots = ArrayList<ColorDot>()
-
-    /** Farbpunkt mit Ring, wenn ausgewählt. */
-    private inner class ColorDot(c: Context, val key: String) : View(c) {
-        var selectedDot = false
-        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
-
-        override fun onDraw(canvas: Canvas) {
-            val cx = width / 2f
-            val cy = height / 2f
-            p.style = Paint.Style.FILL
-            p.color = Ink.resolve(key)
-            canvas.drawCircle(cx, cy, context.dp(10).toFloat(), p)
-            if (selectedDot) {
-                p.style = Paint.Style.STROKE
-                p.strokeWidth = context.dp(2).toFloat()
-                p.color = Ui.ACCENT
-                canvas.drawCircle(cx, cy, context.dp(15).toFloat(), p)
-            }
-        }
-    }
+    private lateinit var tools: InkTools
 
     init {
         orientation = VERTICAL
@@ -250,89 +311,19 @@ class InkScreen(
         addView(ScrollView(ctx).apply { addView(page) }, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
 
         addView(hairline(ctx, false))
-        addView(buildBar(ctx), LayoutParams(LayoutParams.MATCH_PARENT, ctx.dp(64)))
-        selectTool("pen")
-        selectColor("text")
-    }
-
-    private fun buildBar(ctx: Context): View {
-        val row = LinearLayout(ctx).apply {
-            orientation = HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(ctx.dp(12), 0, ctx.dp(12), 0)
-            setBackgroundColor(Ui.SURFACE)
-        }
-
-        fun toolButton(key: String, res: Int, desc: String) {
-            val iv = ImageView(ctx).apply {
-                setImageResource(res)
-                scaleType = ImageView.ScaleType.CENTER
-                contentDescription = desc
-                isClickable = true
-                setOnClickListener { selectTool(key) }
-            }
-            toolSetters[key] = { on ->
-                iv.setColorFilter(if (on) Ui.ACCENT else Ui.TEXT2)
-                iv.background = Ui.ripple(ctx, if (on) Ui.round(ctx, Ui.ACCENT_SOFT, 8) else null, 8)
-            }
-            row.addView(iv, LayoutParams(ctx.dp(44), ctx.dp(44)))
-        }
-
-        fun divider() {
-            row.addView(View(ctx).apply { setBackgroundColor(Ui.BORDER) }, LayoutParams(1, ctx.dp(24)).apply {
-                leftMargin = ctx.dp(8)
-                rightMargin = ctx.dp(8)
-            })
-        }
-
-        toolButton("pen", R.drawable.ic_pen, "Stift")
-        toolButton("marker", R.drawable.ic_marker, "Textmarker")
-        toolButton("eraser", R.drawable.ic_eraser, "Radierer")
-        divider()
-        for (key in listOf("text", "#1d4ed8", "#d12b2b", "#16a34a", "#e8b400")) {
-            val dot = ColorDot(ctx, key).apply {
-                isClickable = true
-                contentDescription = "Farbe"
-                setOnClickListener { selectColor(key) }
-            }
-            colorDots.add(dot)
-            row.addView(dot, LayoutParams(ctx.dp(40), ctx.dp(44)))
-        }
-        divider()
-        row.addView(Ui.iconButton(ctx, R.drawable.ic_undo, "Rückgängig", false) { draw.undo() }, LayoutParams(ctx.dp(44), ctx.dp(44)))
-        row.addView(Ui.iconButton(ctx, R.drawable.ic_plus, "Seite verlängern", false) { draw.extend() }, LayoutParams(ctx.dp(44), ctx.dp(44)))
-
-        // Für Geräte ohne Stift: mit dem Finger zeichnen (dann scrollt der Finger nicht mehr)
-        val finger = Ui.label(ctx, "Finger", 14f, Ui.TEXT2).apply {
-            gravity = Gravity.CENTER
-            setPadding(ctx.dp(12), 0, ctx.dp(12), 0)
-            isClickable = true
-            background = Ui.ripple(ctx, null, 8)
-        }
-        finger.setOnClickListener {
-            draw.fingerDraws = !draw.fingerDraws
-            finger.setTextColor(if (draw.fingerDraws) Ui.ACCENT else Ui.TEXT2)
-            finger.background = Ui.ripple(ctx, if (draw.fingerDraws) Ui.round(ctx, Ui.ACCENT_SOFT, 8) else null, 8)
-        }
-        row.addView(finger, LayoutParams(LayoutParams.WRAP_CONTENT, ctx.dp(44)))
-
-        return HorizontalScrollView(ctx).apply {
-            isHorizontalScrollBarEnabled = false
-            addView(row, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.MATCH_PARENT))
-        }
-    }
-
-    private fun selectTool(key: String) {
-        draw.tool = key
-        for ((k, set) in toolSetters) set(k == key)
-    }
-
-    private fun selectColor(key: String) {
-        draw.color = key
-        for (d in colorDots) {
-            d.selectedDot = d.key == key
-            d.invalidate()
-        }
+        tools = InkTools(
+            ctx,
+            onTool = { draw.model.tool = it; tools.sync(draw.model.tool, draw.model.color) },
+            onColor = { draw.model.color = it; tools.sync(draw.model.tool, draw.model.color) },
+            onUndo = { draw.undo() },
+            onExtend = { draw.extend() },
+            onFull = { draw.fingerDraws = !draw.fingerDraws },
+            onDone = onDone,
+            isInline = false,
+        )
+        tools.fingerOn = { draw.fingerDraws }
+        addView(tools, LayoutParams(LayoutParams.MATCH_PARENT, ctx.dp(64)))
+        tools.sync(draw.model.tool, draw.model.color)
     }
 
     private fun confirmDelete() {

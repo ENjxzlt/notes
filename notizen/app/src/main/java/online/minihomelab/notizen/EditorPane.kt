@@ -1,6 +1,9 @@
 package online.minihomelab.notizen
 
 import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.drawable.Drawable
 import android.os.Handler
 import android.os.Looper
@@ -68,6 +71,25 @@ class EditorPane(
     }
     private val toolbar: View
 
+    // Zeichnen direkt in der Notiz
+    private var inkModel: InkModel? = null
+    private var inkId: String? = null
+    private var inkDir: File? = null
+    private var inkDirty = false
+    private var lastInkTool = "pen"
+    private var lastInkColor = "text"
+    private val inkSave = Runnable { saveInk() }
+    private val inkTools = InkTools(
+        ctx,
+        onTool = { t -> lastInkTool = t; inkModel?.tool = t; syncInkTools() },
+        onColor = { c -> lastInkColor = c; inkModel?.color = c; syncInkTools() },
+        onUndo = { if (inkModel?.undo() == true) { markInkDirty(); edit.invalidate() } },
+        onExtend = { extendInk() },
+        onFull = { openInkFullscreen() },
+        onDone = { deactivateInk() },
+        isInline = true,
+    ).apply { visibility = GONE }
+
     /** Zustandsanzeige der Schnellleiste: Schlüssel wie bei MarkdownStyler.activeFormats. */
     private val toolStates = HashMap<String, (Boolean) -> Unit>()
 
@@ -100,6 +122,7 @@ class EditorPane(
         addView(edit, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
         addView(hint, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
         addView(hairline(ctx, false))
+        addView(inkTools, LayoutParams(LayoutParams.MATCH_PARENT, ctx.dp(64)))
         toolbar = buildToolbar(ctx)
         addView(toolbar, LayoutParams(LayoutParams.MATCH_PARENT, ctx.dp(64)))
 
@@ -129,7 +152,10 @@ class EditorPane(
 
         // Cursor bewegt: Markdown-Zeichen im aktuellen Wort/Zeile ein-, anderswo ausblenden (verzögert, nie mitten im Tippen)
         edit.onSelection = { edit.post { restyle() } }
-        edit.onInkTap = { id -> file?.parentFile?.let { onInk(it, id) } }
+        edit.onInkTap = { id -> activateInk(id) }
+        edit.onInkTapOutside = { deactivateInk() }
+        edit.inkProvider = { id -> activateInk(id) }
+        edit.onInkEdited = { markInkDirty() }
 
         edit.setOnKeyListener { _, code, ev ->
             if (ev.action != KeyEvent.ACTION_DOWN || !ev.isCtrlPressed) return@setOnKeyListener false
@@ -260,12 +286,16 @@ class EditorPane(
         val lineStart = e.toString().lastIndexOf('\n', c - 1) + 1
         val lead = if (c > lineStart) "\n" else ""
         e.insert(c, "$lead![Zeichnung](.ink/$id.svg)\n")
-        onInk(dir, id)
+        activateInk(id)
     }
 
-    /** Nach dem Bearbeiten: Vorschau neu laden (Höhe kann sich geändert haben). */
+    /** Nach dem Bearbeiten im Vollbild: Vorschau neu laden (Höhe kann sich geändert haben). */
     fun refreshInk(id: String) {
-        file?.parentFile?.let { Ink.invalidate(id) }
+        Ink.invalidate(id)
+        relayoutInk()
+    }
+
+    private fun relayoutInk() {
         if (file == null) return
         busy = true
         try {
@@ -279,6 +309,11 @@ class EditorPane(
 
     /** Zeichnung aus der Notiz entfernen (Zeile und Dateien). */
     fun removeInk(dir: File, id: String) {
+        if (inkId == id) {
+            inkDirty = false
+            handler.removeCallbacks(inkSave)
+            clearActiveInk()
+        }
         val e = edit.text
         val marker = "![Zeichnung](.ink/$id.svg)"
         val i = e.toString().indexOf(marker)
@@ -287,6 +322,86 @@ class EditorPane(
             e.delete(i, end)
         }
         Ink.delete(dir, id)
+    }
+
+    // ---- Zeichnen direkt in der Notiz ----
+
+    /** Macht einen Block zum aktiven Zeichenblock (lädt ihn, zeigt die Werkzeuge) und gibt sein Modell zurück. */
+    private fun activateInk(id: String): InkModel? {
+        val dir = file?.parentFile ?: return null
+        if (inkId == id && inkModel != null) return inkModel
+        deactivateInk()
+        val m = InkModel(Ink.load(dir, id))
+        m.tool = lastInkTool
+        m.color = lastInkColor
+        inkModel = m
+        inkId = id
+        inkDir = dir
+        edit.inkModel = m
+        edit.inkActiveId = id
+        inkTools.visibility = VISIBLE
+        syncInkTools()
+        edit.invalidate()
+        return m
+    }
+
+    fun deactivateInk() {
+        val id = inkId ?: return
+        handler.removeCallbacks(inkSave)
+        saveInk()
+        clearActiveInk()
+        Ink.invalidate(id)
+        edit.invalidate()
+    }
+
+    private fun clearActiveInk() {
+        inkModel = null
+        inkId = null
+        inkDir = null
+        edit.inkModel = null
+        edit.inkActiveId = null
+        inkTools.visibility = GONE
+    }
+
+    private fun syncInkTools() = inkTools.sync(lastInkTool, lastInkColor)
+
+    private fun markInkDirty() {
+        inkDirty = true
+        setStatus("…", false)
+        handler.removeCallbacks(inkSave)
+        handler.postDelayed(inkSave, 700)
+    }
+
+    private fun saveInk() {
+        val m = inkModel ?: return
+        val d = inkDir ?: return
+        val id = inkId ?: return
+        if (!inkDirty) return
+        try {
+            Ink.save(d, id, m.doc)
+            inkDirty = false
+            setStatus("Gespeichert", true)
+        } catch (e: Exception) {
+            setStatus("Zeichnung nicht gespeichert", false)
+        }
+    }
+
+    private fun extendInk() {
+        val m = inkModel ?: return
+        val d = inkDir ?: return
+        val id = inkId ?: return
+        m.doc.height = minOf(Ink.MAX_H, m.doc.height + 400)
+        inkDirty = true
+        saveInk()
+        Ink.invalidate(id)
+        relayoutInk()
+    }
+
+    private fun openInkFullscreen() {
+        val id = inkId ?: return
+        val dir = inkDir ?: return
+        deactivateInk()
+        onInk(dir, id)
     }
 
     private fun line(prefix: String) {
@@ -329,6 +444,7 @@ class EditorPane(
 
     fun open(f: File) {
         flush()
+        deactivateInk()
         file = f
         MarkdownStyler.noteDir = f.parentFile
         loading = true
@@ -347,6 +463,7 @@ class EditorPane(
     fun close() {
         handler.removeCallbacks(saveRunnable)
         flush()
+        deactivateInk()
         file = null
         showEmpty()
     }
@@ -373,6 +490,7 @@ class EditorPane(
     }
 
     fun flush() {
+        saveInk()
         val f = file ?: return
         handler.removeCallbacks(saveRunnable)
         if (!dirty) return
@@ -386,12 +504,27 @@ class EditorPane(
     }
 }
 
-/** EditText, das Cursorbewegungen meldet, Antippen von Aufgaben-Kästchen umschaltet und den Text mittig hält. */
+/**
+ * EditText, das Cursorbewegungen meldet, Aufgaben-Kästchen umschaltet, den Text mittig hält und den Stift direkt
+ * auf Zeichenblöcken zeichnen lässt. Ein aktiver Block wird über dem Text live aus dem Modell gezeichnet.
+ */
 private class NoteEdit(ctx: Context) : EditText(ctx) {
     var onSelection: (() -> Unit)? = null
     var onInkTap: ((String) -> Unit)? = null
+    var onInkTapOutside: (() -> Unit)? = null
+    var inkProvider: ((String) -> InkModel?)? = null
+    var onInkEdited: (() -> Unit)? = null
+    var inkModel: InkModel? = null
+    var inkActiveId: String? = null
+
     private var pendingBox: MdCheckbox? = null
-    private var pendingInk: String? = null
+    private var tapCandidate = false
+    private var downX = 0f
+    private var downY = 0f
+    private val slop = android.view.ViewConfiguration.get(ctx).scaledTouchSlop
+
+    // Stiftzeichnen auf einem Block
+    private var penPointer = -1
 
     override fun onSelectionChanged(selStart: Int, selEnd: Int) {
         super.onSelectionChanged(selStart, selEnd)
@@ -406,43 +539,122 @@ private class NoteEdit(ctx: Context) : EditText(ctx) {
         MdInk.blockWidth = w - 2 * side
     }
 
+    private fun blockScale() = MdInk.blockWidth.toFloat() / Ink.W
+
+    /** Oberkante des aktiven Blocks im Inhalt (ohne Scroll), null wenn nicht vorhanden. */
+    private fun activeBlockTop(): Float? {
+        val id = inkActiveId ?: return null
+        val l = layout ?: return null
+        val ed = text ?: return null
+        val sp = ed.getSpans(0, ed.length, MdInk::class.java).firstOrNull { it.id == id } ?: return null
+        val start = ed.getSpanStart(sp)
+        if (start < 0) return null
+        return (l.getLineTop(l.getLineForOffset(start)) + totalPaddingTop).toFloat()
+    }
+
+    /** Berührungspunkt in Seiteneinheiten des aktiven Blocks (an den Rand geklemmt). */
+    private fun toPage(x: Float, y: Float): FloatArray? {
+        val top = activeBlockTop() ?: return null
+        val m = inkModel ?: return null
+        val sc = blockScale()
+        val px = (x + scrollX - paddingLeft) / sc
+        val py = (y + scrollY - top) / sc
+        return floatArrayOf(px.coerceIn(0f, Ink.W.toFloat()), py.coerceIn(0f, m.doc.height.toFloat()))
+    }
+
     override fun onTouchEvent(ev: MotionEvent): Boolean {
+        val type = ev.getToolType(ev.actionIndex)
+        val isPen = type == MotionEvent.TOOL_TYPE_STYLUS || type == MotionEvent.TOOL_TYPE_ERASER
+
+        // Stift auf einem Zeichenblock: direkt zeichnen, kein Cursor, kein Scrollen
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN && isPen && penPointer == -1) {
+            val id = inkAt(ev.x, ev.y)
+            if (id != null) {
+                val m = inkProvider?.invoke(id)
+                val pt = if (m != null) toPage(ev.x, ev.y) else null
+                if (m != null && pt != null) {
+                    penPointer = ev.getPointerId(ev.actionIndex)
+                    requestUnbufferedDispatch(ev)
+                    parent?.requestDisallowInterceptTouchEvent(true)
+                    val button = (ev.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
+                    m.down(pt[0], pt[1], ev.pressure, type == MotionEvent.TOOL_TYPE_ERASER || button)
+                    invalidate()
+                    return true
+                }
+            }
+        }
+        if (penPointer != -1) {
+            val m = inkModel
+            val i = ev.findPointerIndex(penPointer)
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_MOVE -> if (m != null && i != -1) {
+                    for (h in 0 until ev.historySize) {
+                        toPage(ev.getHistoricalX(i, h), ev.getHistoricalY(i, h))?.let { m.move(it[0], it[1], ev.getHistoricalPressure(i, h)) }
+                    }
+                    toPage(ev.getX(i), ev.getY(i))?.let { m.move(it[0], it[1], ev.pressure) }
+                    invalidate()
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> if (ev.getPointerId(ev.actionIndex) == penPointer) {
+                    if (m != null && m.up()) onInkEdited?.invoke()
+                    penPointer = -1
+                    invalidate()
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    // Das System hat die Berührung als Handballen erkannt: Strich verwerfen
+                    m?.cancel()
+                    penPointer = -1
+                    invalidate()
+                }
+            }
+            return true
+        }
+
+        // Finger (und Stift außerhalb von Blöcken): Kästchen umschalten, Tippen auf Blöcke aktiviert sie
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                downX = ev.x
+                downY = ev.y
+                tapCandidate = true
                 pendingBox = boxAt(ev.x, ev.y)
-                pendingInk = if (pendingBox == null) inkAt(ev.x, ev.y) else null
-                if (pendingBox != null || pendingInk != null) return true
+                if (pendingBox != null) return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (Math.hypot((ev.x - downX).toDouble(), (ev.y - downY).toDouble()) > slop) tapCandidate = false
+                if (pendingBox != null) return true
             }
             MotionEvent.ACTION_UP -> {
                 val box = pendingBox
-                val ink = pendingInk
                 pendingBox = null
-                pendingInk = null
                 if (box != null) {
                     if (boxAt(ev.x, ev.y) === box) toggle(box)
                     return true
                 }
-                if (ink != null) {
-                    if (inkAt(ev.x, ev.y) == ink) onInkTap?.invoke(ink)
-                    return true
+                if (tapCandidate) {
+                    val id = inkAt(ev.x, ev.y)
+                    if (id != null) {
+                        // Antippen eines Blocks: aktivieren, ohne Cursor und Tastatur
+                        val cancel = MotionEvent.obtain(ev)
+                        cancel.action = MotionEvent.ACTION_CANCEL
+                        super.onTouchEvent(cancel)
+                        cancel.recycle()
+                        onInkTap?.invoke(id)
+                        return true
+                    } else if (inkActiveId != null) {
+                        onInkTapOutside?.invoke()
+                    }
                 }
             }
-            MotionEvent.ACTION_CANCEL -> {
-                pendingBox = null
-                pendingInk = null
-            }
-            else -> if (pendingBox != null || pendingInk != null) return true
+            MotionEvent.ACTION_CANCEL -> pendingBox = null
         }
         return super.onTouchEvent(ev)
     }
 
-    /** Zeichnung unter dem Finger/Stift (die ganze Fläche des Blocks zählt). */
+    /** Zeichenblock in der Zeile unter dem Finger/Stift (die ganze Fläche des Blocks zählt). */
     private fun inkAt(x: Float, y: Float): String? {
         val l = layout ?: return null
         val ed = text ?: return null
         val line = l.getLineForVertical((y - totalPaddingTop + scrollY).toInt())
-        val sp = ed.getSpans(l.getLineStart(line), l.getLineEnd(line), MdInk::class.java).firstOrNull() ?: return null
-        return sp.id
+        return ed.getSpans(l.getLineStart(line), l.getLineEnd(line), MdInk::class.java).firstOrNull()?.id
     }
 
     private fun boxAt(x: Float, y: Float): MdCheckbox? {
@@ -451,11 +663,11 @@ private class NoteEdit(ctx: Context) : EditText(ctx) {
         val line = l.getLineForVertical((y - totalPaddingTop + scrollY).toInt())
         val from = l.getLineStart(line)
         val to = l.getLineEnd(line)
-        val slop = context.dp(12)
+        val slopPx = context.dp(12)
         for (sp in ed.getSpans(from, to, MdCheckbox::class.java)) {
             val x0 = l.getPrimaryHorizontal(ed.getSpanStart(sp)) + totalPaddingLeft - scrollX
             val x1 = l.getPrimaryHorizontal(ed.getSpanEnd(sp)) + totalPaddingLeft - scrollX
-            if (x >= x0 - slop && x <= x1 + slop) return sp
+            if (x >= x0 - slopPx && x <= x1 + slopPx) return sp
         }
         return null
     }
@@ -466,5 +678,28 @@ private class NoteEdit(ctx: Context) : EditText(ctx) {
         val s = ed.getSpanStart(box)
         if (s < 0) return
         ed.replace(s + 3, s + 4, if (box.checked) " " else "x")
+    }
+
+    /** Den aktiven Zeichenblock live aus dem Modell über den Text zeichnen (deckt die Vorschau ab). */
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val m = inkModel ?: return
+        val top = activeBlockTop() ?: return
+        val sc = blockScale()
+        val w = MdInk.blockWidth.toFloat()
+        val h = m.doc.height * sc
+        canvas.save()
+        canvas.translate(paddingLeft.toFloat(), top)
+        canvas.clipRect(0f, 0f, w, h)
+        Ink.drawPaper(canvas, w, h, sc, 12f * sc)
+        for (s in m.doc.strokes) Ink.drawStroke(canvas, s, sc)
+        m.current?.let { Ink.drawStroke(canvas, it, sc) }
+        // Rahmen zeigt: dieser Block ist aktiv
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = context.dp(2).toFloat()
+        p.color = Ui.ACCENT
+        canvas.drawRoundRect(RectF(1f, 1f, w - 1, h - 1), 12f * sc, 12f * sc, p)
+        canvas.restore()
     }
 }

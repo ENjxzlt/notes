@@ -23,6 +23,92 @@ class InkDoc(var height: Int = 600) {
 }
 
 /**
+ * Zeichenlogik ohne Oberfläche: Striche aufnehmen, radieren (ganze Striche), rückgängig machen.
+ * Wird vom Vollbild-Editor und vom Zeichnen direkt in der Notiz benutzt.
+ */
+class InkModel(val doc: InkDoc) {
+    var tool = "pen" // pen, marker, eraser
+    var color = "text"
+    var current: InkStroke? = null
+    /** Letzter abgeschlossener Vorgang war Radieren (dann muss die Seite neu gezeichnet werden). */
+    var lastWasErase = false
+
+    private class Op(val added: InkStroke?, val removed: List<Pair<Int, InkStroke>>)
+
+    private val ops = ArrayList<Op>()
+    private var erasing = false
+    private var erasedNow = ArrayList<Pair<Int, InkStroke>>()
+
+    /** Gibt true zurück, wenn sich bereits Gezeichnetes geändert hat (Radieren). */
+    fun down(x: Float, y: Float, p: Float, forceErase: Boolean): Boolean {
+        erasing = forceErase || tool == "eraser"
+        if (erasing) {
+            erasedNow = ArrayList()
+            return eraseAt(x, y)
+        }
+        current = InkStroke(tool, color).also { it.pts.add(floatArrayOf(x, y, p)) }
+        return false
+    }
+
+    fun move(x: Float, y: Float, p: Float): Boolean {
+        if (erasing) return eraseAt(x, y)
+        current?.pts?.add(floatArrayOf(x, y, p))
+        return false
+    }
+
+    /** Schließt den Strich ab; true, wenn sich die Zeichnung geändert hat. */
+    fun up(): Boolean {
+        var changed = false
+        lastWasErase = erasing
+        if (erasing) {
+            if (erasedNow.isNotEmpty()) {
+                ops.add(Op(null, erasedNow))
+                changed = true
+            }
+        } else {
+            current?.let {
+                doc.strokes.add(it)
+                ops.add(Op(it, emptyList()))
+                changed = true
+            }
+        }
+        current = null
+        erasing = false
+        return changed
+    }
+
+    /** Berührung abgebrochen (Handballen): Strich verwerfen. */
+    fun cancel() {
+        if (erasing && erasedNow.isNotEmpty()) ops.add(Op(null, erasedNow))
+        current = null
+        erasing = false
+    }
+
+    fun undo(): Boolean {
+        val op = ops.removeLastOrNull() ?: return false
+        op.added?.let { doc.strokes.remove(it) }
+        for ((i, s) in op.removed.sortedBy { it.first }) doc.strokes.add(minOf(i, doc.strokes.size), s)
+        return true
+    }
+
+    private fun eraseAt(x: Float, y: Float): Boolean {
+        val radius = 14f
+        var changed = false
+        var i = doc.strokes.size - 1
+        while (i >= 0) {
+            val s = doc.strokes[i]
+            if (s.pts.any { kotlin.math.hypot(it[0] - x, it[1] - y) < radius }) {
+                erasedNow.add(Pair(i, s))
+                doc.strokes.removeAt(i)
+                changed = true
+            }
+            i--
+        }
+        return changed
+    }
+}
+
+/**
  * Zeichnungen liegen neben der Notiz im versteckten Ordner `.ink`: `<id>.json` (bearbeitbar, mit Druck) und
  * `<id>.svg` (Vorschau für andere Programme). In der Notiz steht nur `![Zeichnung](.ink/<id>.svg)`.
  */
