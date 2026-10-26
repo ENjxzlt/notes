@@ -59,6 +59,13 @@ class InkTools(
     /** Nur im Vollbild: ob mit dem Finger gezeichnet wird (für die Anzeige des Schalters). */
     var fingerOn: () -> Boolean = { false }
 
+    private lateinit var extendBtn: View
+
+    /** "Seite verlängern" gibt es nur für Zeichenblöcke, nicht für die Ebene über der Notiz. */
+    fun showExtend(on: Boolean) {
+        extendBtn.visibility = if (on) VISIBLE else GONE
+    }
+
     init {
         isHorizontalScrollBarEnabled = false
         setBackgroundColor(Ui.SURFACE)
@@ -105,7 +112,8 @@ class InkTools(
         }
         divider()
         row.addView(Ui.iconButton(ctx, R.drawable.ic_undo, "Rückgängig", false) { onUndo() }, LinearLayout.LayoutParams(ctx.dp(44), ctx.dp(44)))
-        row.addView(Ui.iconButton(ctx, R.drawable.ic_plus, "Seite verlängern", false) { onExtend() }, LinearLayout.LayoutParams(ctx.dp(44), ctx.dp(44)))
+        extendBtn = Ui.iconButton(ctx, R.drawable.ic_plus, "Seite verlängern", false) { onExtend() }
+        row.addView(extendBtn, LinearLayout.LayoutParams(ctx.dp(44), ctx.dp(44)))
         if (isInline) {
             row.addView(Ui.iconButton(ctx, R.drawable.ic_expand, "Vollbild", false) { onFull() }, LinearLayout.LayoutParams(ctx.dp(44), ctx.dp(44)))
             row.addView(Ui.label(ctx, "Fertig", 14f, Ui.ACCENT, Ui.sansMedium).apply {

@@ -53,10 +53,24 @@ class NoteStore(val root: File) {
         if (n.isEmpty()) return null
         val target = File(f.parentFile, if (f.isFile) "$n.md" else n)
         if (target.exists()) return null
-        return if (f.renameTo(target)) target else null
+        if (!f.renameTo(target)) return null
+        if (f.isFile || target.isFile) moveOverlay(target.parentFile, f.nameWithoutExtension, n)
+        return target
     }
 
-    fun delete(f: File): Boolean = f.deleteRecursively()
+    /** Die Zeichenebene (.ink/_page_<Name>.json/.svg) folgt der Notiz. */
+    private fun moveOverlay(dir: File?, oldName: String, newName: String) {
+        if (dir == null) return
+        for (ext in listOf("json", "svg")) {
+            val from = File(Ink.dir(dir), "${Ink.overlayId(oldName)}.$ext")
+            if (from.isFile) from.renameTo(File(Ink.dir(dir), "${Ink.overlayId(newName)}.$ext"))
+        }
+    }
+
+    fun delete(f: File): Boolean {
+        if (f.isFile) f.parentFile?.let { Ink.delete(it, Ink.overlayId(f.nameWithoutExtension)) }
+        return f.deleteRecursively()
+    }
 
     fun read(f: File): String = f.readText()
 

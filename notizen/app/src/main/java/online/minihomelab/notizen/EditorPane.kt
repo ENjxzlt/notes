@@ -76,17 +76,24 @@ class EditorPane(
     private var inkId: String? = null
     private var inkDir: File? = null
     private var inkDirty = false
+    // Zeichenebene über der ganzen Notiz
+    private var overlayModel: InkModel? = null
+    private var overlayDir: File? = null
+    private var overlayId: String? = null
+    private var overlayDirty = false
+    private var drawMode = ctx.getSharedPreferences("notizen-ui", Context.MODE_PRIVATE).getBoolean("draw", true)
+    private val overlaySave = Runnable { saveOverlay() }
     private var lastInkTool = "pen"
     private var lastInkColor = "text"
     private val inkSave = Runnable { saveInk() }
     private val inkTools = InkTools(
         ctx,
-        onTool = { t -> lastInkTool = t; inkModel?.tool = t; syncInkTools() },
-        onColor = { c -> lastInkColor = c; inkModel?.color = c; syncInkTools() },
-        onUndo = { if (inkModel?.undo() == true) { markInkDirty(); edit.invalidate() } },
+        onTool = { t -> lastInkTool = t; inkModel?.tool = t; overlayModel?.tool = t; syncInkTools() },
+        onColor = { c -> lastInkColor = c; inkModel?.color = c; overlayModel?.color = c; syncInkTools() },
+        onUndo = { undoInk() },
         onExtend = { extendInk() },
         onFull = { openInkFullscreen() },
-        onDone = { deactivateInk() },
+        onDone = { if (inkId != null) deactivateInk() else setDrawMode(false) },
         isInline = true,
     ).apply { visibility = GONE }
 
@@ -156,6 +163,7 @@ class EditorPane(
         edit.onInkTapOutside = { deactivateInk() }
         edit.inkProvider = { id -> activateInk(id) }
         edit.onInkEdited = { markInkDirty() }
+        edit.onOverlayEdited = { markOverlayDirty() }
 
         edit.setOnKeyListener { _, code, ev ->
             if (ev.action != KeyEvent.ACTION_DOWN || !ev.isCtrlPressed) return@setOnKeyListener false
@@ -192,7 +200,7 @@ class EditorPane(
 
     private fun updateToolbar(e: Editable) {
         val active = MarkdownStyler.activeFormats(e.toString(), maxOf(0, edit.selectionStart))
-        for ((key, set) in toolStates) set(key in active)
+        for ((key, set) in toolStates) if (key != "ink") set(key in active)
     }
 
     // ---- Schnellleiste ----
@@ -262,31 +270,12 @@ class EditorPane(
         textButton("italic", "I", "Kursiv", false, 2) { wrapSel("*") }
         iconButton("code", R.drawable.ic_code, "Code") { wrapSel("`") }
         divider()
-        iconButton("ink", R.drawable.ic_pen, "Zeichnung einfügen") { insertInk() }
+        iconButton("ink", R.drawable.ic_pen, "Mit dem Stift zeichnen an/aus") { setDrawMode(!drawMode) }
 
         return HorizontalScrollView(ctx).apply {
             isHorizontalScrollBarEnabled = false
             addView(row, android.widget.FrameLayout.LayoutParams(android.widget.FrameLayout.LayoutParams.WRAP_CONTENT, android.widget.FrameLayout.LayoutParams.MATCH_PARENT))
         }
-    }
-
-    /** Neue Zeichnung in einer eigenen Zeile an der Cursorposition einfügen und gleich öffnen. */
-    private fun insertInk() {
-        val f = file ?: return
-        val dir = f.parentFile ?: return
-        val id = Ink.newId()
-        try {
-            Ink.save(dir, id, InkDoc())
-        } catch (e: Exception) {
-            setStatus("Zeichnung nicht anlegbar", false)
-            return
-        }
-        val e = edit.text
-        val c = edit.selectionStart.coerceAtLeast(0)
-        val lineStart = e.toString().lastIndexOf('\n', c - 1) + 1
-        val lead = if (c > lineStart) "\n" else ""
-        e.insert(c, "$lead![Zeichnung](.ink/$id.svg)\n")
-        activateInk(id)
     }
 
     /** Nach dem Bearbeiten im Vollbild: Vorschau neu laden (Höhe kann sich geändert haben). */
@@ -339,8 +328,7 @@ class EditorPane(
         inkDir = dir
         edit.inkModel = m
         edit.inkActiveId = id
-        inkTools.visibility = VISIBLE
-        syncInkTools()
+        updateInkTools()
         edit.invalidate()
         return m
     }
@@ -360,10 +348,76 @@ class EditorPane(
         inkDir = null
         edit.inkModel = null
         edit.inkActiveId = null
-        inkTools.visibility = GONE
+        updateInkTools()
     }
 
     private fun syncInkTools() = inkTools.sync(lastInkTool, lastInkColor)
+
+    /** Leiste zeigen, solange der Stift zeichnen darf oder ein Block aktiv ist. */
+    private fun updateInkTools() {
+        inkTools.visibility = if (file != null && (drawMode || inkId != null)) VISIBLE else GONE
+        inkTools.showExtend(inkId != null)
+        syncInkTools()
+        toolStates["ink"]?.invoke(drawMode)
+        edit.drawMode = drawMode
+    }
+
+    private fun setDrawMode(on: Boolean) {
+        drawMode = on
+        context.getSharedPreferences("notizen-ui", Context.MODE_PRIVATE).edit().putBoolean("draw", on).apply()
+        updateInkTools()
+    }
+
+    private fun undoInk() {
+        val block = inkModel
+        if (block != null) {
+            if (block.undo()) markInkDirty()
+        } else if (overlayModel?.undo() == true) {
+            markOverlayDirty()
+        }
+        edit.invalidate()
+    }
+
+    // ---- Zeichenebene (Stift überall in der Notiz) ----
+
+    private fun loadOverlay(f: File) {
+        val dir = f.parentFile
+        overlayDir = dir
+        overlayId = Ink.overlayId(f.nameWithoutExtension)
+        val m = InkModel(if (dir != null) Ink.load(dir, overlayId!!) else InkDoc())
+        m.tool = lastInkTool
+        m.color = lastInkColor
+        overlayModel = m
+        edit.overlayModel = m
+    }
+
+    private fun markOverlayDirty() {
+        overlayDirty = true
+        setStatus("…", false)
+        handler.removeCallbacks(overlaySave)
+        handler.postDelayed(overlaySave, 700)
+    }
+
+    private fun saveOverlay() {
+        val m = overlayModel ?: return
+        val d = overlayDir ?: return
+        val id = overlayId ?: return
+        if (!overlayDirty) return
+        try {
+            var maxY = 0f
+            for (st in m.doc.strokes) {
+                st.bounds()
+                if (st.y1 > maxY) maxY = st.y1
+            }
+            m.doc.height = maxOf(200, maxY.toInt() + 100)
+            if (m.doc.strokes.isEmpty()) Ink.delete(d, id) else Ink.save(d, id, m.doc)
+            overlayDirty = false
+            setStatus("Gespeichert", true)
+        } catch (e: Exception) {
+            setStatus("Zeichnung nicht gespeichert", false)
+        }
+    }
+
 
     private fun markInkDirty() {
         inkDirty = true
@@ -447,6 +501,7 @@ class EditorPane(
         deactivateInk()
         file = f
         MarkdownStyler.noteDir = f.parentFile
+        loadOverlay(f)
         loading = true
         edit.setText(store.read(f))
         loading = false
@@ -457,6 +512,7 @@ class EditorPane(
         edit.visibility = VISIBLE
         toolbar.visibility = VISIBLE
         hint.visibility = GONE
+        updateInkTools()
         edit.requestFocus()
     }
 
@@ -475,6 +531,9 @@ class EditorPane(
     }
 
     private fun showEmpty() {
+        overlayModel = null
+        edit.overlayModel = null
+        updateInkTools()
         title.text = ""
         setStatus("", false)
         edit.visibility = GONE
@@ -491,6 +550,7 @@ class EditorPane(
 
     fun flush() {
         saveInk()
+        saveOverlay()
         val f = file ?: return
         handler.removeCallbacks(saveRunnable)
         if (!dirty) return
@@ -514,8 +574,11 @@ private class NoteEdit(ctx: Context) : EditText(ctx) {
     var onInkTapOutside: (() -> Unit)? = null
     var inkProvider: ((String) -> InkModel?)? = null
     var onInkEdited: (() -> Unit)? = null
+    var onOverlayEdited: (() -> Unit)? = null
     var inkModel: InkModel? = null
     var inkActiveId: String? = null
+    var overlayModel: InkModel? = null
+    var drawMode = true
 
     private var pendingBox: MdCheckbox? = null
     private var tapCandidate = false
@@ -523,8 +586,9 @@ private class NoteEdit(ctx: Context) : EditText(ctx) {
     private var downY = 0f
     private val slop = android.view.ViewConfiguration.get(ctx).scaledTouchSlop
 
-    // Stiftzeichnen auf einem Block
+    // Stiftzeichnen: auf einem Block oder auf der Ebene über der ganzen Notiz
     private var penPointer = -1
+    private var penOnOverlay = false
 
     override fun onSelectionChanged(selStart: Int, selEnd: Int) {
         super.onSelectionChanged(selStart, selEnd)
@@ -562,40 +626,62 @@ private class NoteEdit(ctx: Context) : EditText(ctx) {
         return floatArrayOf(px.coerceIn(0f, Ink.W.toFloat()), py.coerceIn(0f, m.doc.height.toFloat()))
     }
 
+    /** Berührungspunkt in Seiteneinheiten der Ebene über der Notiz (Spalte = 1000 Einheiten, nach unten unbegrenzt). */
+    private fun toOverlay(x: Float, y: Float): FloatArray {
+        val sc = blockScale()
+        return floatArrayOf((x + scrollX - paddingLeft) / sc, (y + scrollY - totalPaddingTop) / sc)
+    }
+
     override fun onTouchEvent(ev: MotionEvent): Boolean {
         val type = ev.getToolType(ev.actionIndex)
         val isPen = type == MotionEvent.TOOL_TYPE_STYLUS || type == MotionEvent.TOOL_TYPE_ERASER
 
-        // Stift auf einem Zeichenblock: direkt zeichnen, kein Cursor, kein Scrollen
+        // Stift: auf einem Zeichenblock oder überall in der Notiz direkt zeichnen, kein Cursor, kein Scrollen
         if (ev.actionMasked == MotionEvent.ACTION_DOWN && isPen && penPointer == -1) {
+            val button = (ev.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
+            val erase = type == MotionEvent.TOOL_TYPE_ERASER || button
             val id = inkAt(ev.x, ev.y)
             if (id != null) {
                 val m = inkProvider?.invoke(id)
                 val pt = if (m != null) toPage(ev.x, ev.y) else null
                 if (m != null && pt != null) {
                     penPointer = ev.getPointerId(ev.actionIndex)
+                    penOnOverlay = false
                     requestUnbufferedDispatch(ev)
                     parent?.requestDisallowInterceptTouchEvent(true)
-                    val button = (ev.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
-                    m.down(pt[0], pt[1], ev.pressure, type == MotionEvent.TOOL_TYPE_ERASER || button)
+                    m.down(pt[0], pt[1], ev.pressure, erase)
                     invalidate()
                     return true
                 }
             }
+            val ov = overlayModel
+            if (ov != null && drawMode) {
+                val pt = toOverlay(ev.x, ev.y)
+                penPointer = ev.getPointerId(ev.actionIndex)
+                penOnOverlay = true
+                requestUnbufferedDispatch(ev)
+                parent?.requestDisallowInterceptTouchEvent(true)
+                ov.down(pt[0], pt[1], ev.pressure, erase)
+                invalidate()
+                return true
+            }
         }
         if (penPointer != -1) {
-            val m = inkModel
+            val m = if (penOnOverlay) overlayModel else inkModel
             val i = ev.findPointerIndex(penPointer)
+            fun point(x: Float, y: Float) = if (penOnOverlay) toOverlay(x, y) else toPage(x, y)
             when (ev.actionMasked) {
                 MotionEvent.ACTION_MOVE -> if (m != null && i != -1) {
                     for (h in 0 until ev.historySize) {
-                        toPage(ev.getHistoricalX(i, h), ev.getHistoricalY(i, h))?.let { m.move(it[0], it[1], ev.getHistoricalPressure(i, h)) }
+                        point(ev.getHistoricalX(i, h), ev.getHistoricalY(i, h))?.let { m.move(it[0], it[1], ev.getHistoricalPressure(i, h)) }
                     }
-                    toPage(ev.getX(i), ev.getY(i))?.let { m.move(it[0], it[1], ev.pressure) }
+                    point(ev.getX(i), ev.getY(i))?.let { m.move(it[0], it[1], ev.pressure) }
                     invalidate()
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> if (ev.getPointerId(ev.actionIndex) == penPointer) {
-                    if (m != null && m.up()) onInkEdited?.invoke()
+                    if (m != null && m.up()) {
+                        if (penOnOverlay) onOverlayEdited?.invoke() else onInkEdited?.invoke()
+                    }
                     penPointer = -1
                     invalidate()
                 }
@@ -683,6 +769,28 @@ private class NoteEdit(ctx: Context) : EditText(ctx) {
     /** Den aktiven Zeichenblock live aus dem Modell über den Text zeichnen (deckt die Vorschau ab). */
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        drawActiveBlock(canvas)
+        drawOverlay(canvas)
+    }
+
+    /** Die Zeichenebene liegt über Text und Blöcken; nur sichtbare Striche werden gezeichnet. */
+    private fun drawOverlay(canvas: Canvas) {
+        val ov = overlayModel ?: return
+        if (ov.doc.strokes.isEmpty() && ov.current == null) return
+        val sc = blockScale()
+        canvas.save()
+        canvas.translate(paddingLeft.toFloat(), totalPaddingTop.toFloat())
+        val clip = canvas.clipBounds
+        for (s in ov.doc.strokes) {
+            s.bounds()
+            if ((s.y1 + 16f) * sc < clip.top || (s.y0 - 16f) * sc > clip.bottom) continue
+            Ink.drawStroke(canvas, s, sc)
+        }
+        ov.current?.let { Ink.drawStroke(canvas, it, sc) }
+        canvas.restore()
+    }
+
+    private fun drawActiveBlock(canvas: Canvas) {
         val m = inkModel ?: return
         val top = activeBlockTop() ?: return
         val sc = blockScale()

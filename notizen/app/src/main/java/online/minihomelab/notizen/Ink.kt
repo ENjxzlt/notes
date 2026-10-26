@@ -15,6 +15,24 @@ import java.util.UUID
 /** Ein Strich: Werkzeug ("pen"/"marker"), Farbe ("text" = Textfarbe oder "#rrggbb") und Punkte (x, y, Druck). */
 class InkStroke(val tool: String, val color: String) {
     val pts = ArrayList<FloatArray>()
+
+    // Ober-/Unterkante (nur zum Überspringen nicht sichtbarer Striche), wird bei Bedarf neu berechnet
+    var y0 = 0f
+    var y1 = 0f
+    private var boundsFor = -1
+
+    fun bounds() {
+        if (boundsFor == pts.size) return
+        var a = Float.MAX_VALUE
+        var b = -Float.MAX_VALUE
+        for (p in pts) {
+            if (p[1] < a) a = p[1]
+            if (p[1] > b) b = p[1]
+        }
+        y0 = a
+        y1 = b
+        boundsFor = pts.size
+    }
 }
 
 /** Eine Zeichnung auf einer Seite von 1000 Einheiten Breite und [height] Einheiten Höhe. */
@@ -124,6 +142,9 @@ object Ink {
     }
 
     fun dir(noteDir: File) = File(noteDir, ".ink")
+    /** Zeichenebene einer Notiz (über dem ganzen Text), Dateiname `_page_<Notizname>`. */
+    fun overlayId(noteName: String) = "_page_$noteName"
+
     fun newId(): String = UUID.randomUUID().toString().replace("-", "").take(8)
     fun widthFor(p: Float) = 1.2f + 4.5f * p.coerceIn(0f, 1f)
 
