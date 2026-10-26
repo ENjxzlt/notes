@@ -5,7 +5,6 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
-import android.graphics.Typeface
 import android.text.Editable
 import android.text.Spanned
 import android.text.style.BackgroundColorSpan
@@ -13,16 +12,13 @@ import android.text.style.ForegroundColorSpan
 import android.text.style.RelativeSizeSpan
 import android.text.style.ReplacementSpan
 import android.text.style.StrikethroughSpan
-import android.text.style.StyleSpan
-import android.text.style.TypefaceSpan
+import android.graphics.Typeface
 
 // Eigene Span-Klassen, damit wir beim Neuformatieren genau diese und nichts anderes entfernen
 interface MdSpan
 class MdSize(f: Float) : RelativeSizeSpan(f), MdSpan
-class MdBold : StyleSpan(Typeface.BOLD), MdSpan
-class MdItalic : StyleSpan(Typeface.ITALIC), MdSpan
+class MdFont(face: Typeface) : FontSpan(face), MdSpan
 class MdColor(c: Int) : ForegroundColorSpan(c), MdSpan
-class MdMono : TypefaceSpan("monospace"), MdSpan
 class MdBg(c: Int) : BackgroundColorSpan(c), MdSpan
 class MdStrike : StrikethroughSpan(), MdSpan
 
@@ -44,7 +40,7 @@ class MdCheckbox(val checked: Boolean) : ReplacementSpan(), MdSpan {
         val p = Paint(Paint.ANTI_ALIAS_FLAG)
         if (checked) {
             p.style = Paint.Style.FILL
-            p.color = Ui.ACCENT
+            p.color = Ui.ACCENT_BG
             canvas.drawRoundRect(RectF(left, boxTop, left + side, boxBottom), radius, radius, p)
             p.style = Paint.Style.STROKE
             p.color = Color.WHITE
@@ -66,6 +62,21 @@ class MdCheckbox(val checked: Boolean) : ReplacementSpan(), MdSpan {
     }
 }
 
+/** "- " bzw. "* " als kleiner Akzent-Punkt statt Strich. */
+class MdBullet : ReplacementSpan(), MdSpan {
+    override fun getSize(paint: Paint, text: CharSequence?, start: Int, end: Int, fm: Paint.FontMetricsInt?): Int =
+        (paint.textSize * 1.1f).toInt()
+
+    override fun draw(
+        canvas: Canvas, text: CharSequence?, start: Int, end: Int,
+        x: Float, top: Int, y: Int, bottom: Int, paint: Paint,
+    ) {
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        p.color = Ui.ACCENT
+        canvas.drawCircle(x + paint.textSize * 0.3f, y - paint.textSize * 0.32f, paint.textSize * 0.14f, p)
+    }
+}
+
 /** Blendet Markdown-Zeichen aus: Breite 0, nichts gezeichnet. */
 class MdHide : ReplacementSpan(), MdSpan {
     override fun getSize(paint: Paint, text: CharSequence?, start: Int, end: Int, fm: Paint.FontMetricsInt?): Int = 0
@@ -78,13 +89,11 @@ class MdHide : ReplacementSpan(), MdSpan {
 
 /**
  * Gespeichert wird reines Markdown. Im Editor werden die Zeichen nur optisch gestaltet:
- * Überschriften groß, Aufzählungszeichen farbig. Markierungszeichen (#, **, *, `) sind ausgeblendet und
- * erscheinen grau, solange der Cursor in der Überschrift-Zeile bzw. im Wort steht.
+ * Überschriften groß, Aufzählungen als Punkt, Aufgaben als Kästchen. Markierungszeichen (#, **, *, `) sind
+ * ausgeblendet und erscheinen grau, solange der Cursor in der Überschrift-Zeile bzw. im Wort steht.
  */
 object MarkdownStyler {
-    private val GRAY = Color.rgb(0x9A, 0xA0, 0xA6)
-    private val CODE_BG = Color.rgb(0xF1, 0xF3, 0xF5)
-    private val SIZES = floatArrayOf(1.6f, 1.35f, 1.15f)
+    private val SIZES = floatArrayOf(1.9f, 1.35f, 1.15f)
 
     private val heading = Regex("^(#{1,3}) ")
     private val listItem = Regex("^(\\s*)(- \\[[ xX]\\] |- |\\* |\\d+\\. )")
@@ -109,11 +118,11 @@ object MarkdownStyler {
 
             if (line.startsWith("```")) {
                 inFence = !inFence
-                e.mark(MdColor(GRAY), pos, end)
-                e.mark(MdMono(), pos, end)
+                e.mark(MdColor(Ui.FAINT), pos, end)
+                e.mark(MdFont(Ui.mono), pos, end)
             } else if (inFence) {
-                e.mark(MdMono(), pos, end)
-                e.mark(MdBg(CODE_BG), pos, end)
+                e.mark(MdFont(Ui.mono), pos, end)
+                e.mark(MdBg(Ui.SUBTLE), pos, end)
             } else {
                 styleLine(e, line, pos, end, selStart, selEnd)
             }
@@ -126,9 +135,9 @@ object MarkdownStyler {
         if (h != null) {
             val level = h.groupValues[1].length
             e.mark(MdSize(SIZES[level - 1]), pos, end)
-            e.mark(MdBold(), pos, end)
+            e.mark(MdFont(Ui.sansSemi), pos, end)
             val active = selStart <= end && selEnd >= pos
-            e.mark(if (active) MdColor(GRAY) else MdHide(), pos, pos + h.value.length)
+            e.mark(if (active) MdColor(Ui.FAINT) else MdHide(), pos, pos + h.value.length)
             return
         }
         var contentStart = pos
@@ -137,15 +146,17 @@ object MarkdownStyler {
             val markerStart = pos + li.groupValues[1].length
             val markerEnd = pos + li.value.length
             val markerText = li.groupValues[2]
-            if (markerText.startsWith("- [")) {
-                e.mark(MdCheckbox(markerText[3] != ' '), markerStart, markerEnd)
-            } else {
-                e.mark(MdColor(Ui.ACCENT), markerStart, markerEnd)
-                e.mark(MdBold(), markerStart, markerEnd)
+            when {
+                markerText.startsWith("- [") -> e.mark(MdCheckbox(markerText[3] != ' '), markerStart, markerEnd)
+                markerText[0].isDigit() -> {
+                    e.mark(MdColor(Ui.ACCENT), markerStart, markerEnd)
+                    e.mark(MdFont(Ui.monoMedium), markerStart, markerEnd)
+                }
+                else -> e.mark(MdBullet(), markerStart, markerEnd)
             }
             if (markerText.startsWith("- [") && markerText[3] != ' ') {
                 e.mark(MdStrike(), markerEnd, end)
-                e.mark(MdColor(GRAY), markerEnd, end)
+                e.mark(MdColor(Ui.FAINT), markerEnd, end)
             }
             contentStart = markerEnd
         }
@@ -153,11 +164,11 @@ object MarkdownStyler {
     }
 
     private fun inline(e: Editable, text: String, offset: Int, selStart: Int, selEnd: Int) {
-        fun marker(touching: Boolean): Any = if (touching) MdColor(GRAY) else MdHide()
+        fun marker(touching: Boolean): Any = if (touching) MdColor(Ui.FAINT) else MdHide()
         for (m in bold.findAll(text)) {
             val s = offset + m.range.first
             val t = offset + m.range.last + 1
-            e.mark(MdBold(), s, t)
+            e.mark(MdFont(Ui.sansSemi), s, t)
             val touch = selStart <= t && selEnd >= s
             e.mark(marker(touch), s, s + 2)
             e.mark(marker(touch), t - 2, t)
@@ -165,7 +176,7 @@ object MarkdownStyler {
         for (m in italic.findAll(text)) {
             val s = offset + m.range.first
             val t = offset + m.range.last + 1
-            e.mark(MdItalic(), s, t)
+            e.mark(MdFont(Ui.sansItalic), s, t)
             val touch = selStart <= t && selEnd >= s
             e.mark(marker(touch), s, s + 1)
             e.mark(marker(touch), t - 1, t)
@@ -173,12 +184,38 @@ object MarkdownStyler {
         for (m in code.findAll(text)) {
             val s = offset + m.range.first
             val t = offset + m.range.last + 1
-            e.mark(MdMono(), s, t)
-            e.mark(MdBg(CODE_BG), s, t)
+            e.mark(MdFont(Ui.mono), s, t)
+            e.mark(MdBg(Ui.SUBTLE), s, t)
             val touch = selStart <= t && selEnd >= s
             e.mark(marker(touch), s, s + 1)
             e.mark(marker(touch), t - 1, t)
         }
+    }
+
+    /** Welche Formate an der Cursorposition gelten: h1..h3, list, num, task, bold, italic, code. */
+    fun activeFormats(text: String, cursor: Int): Set<String> {
+        val c = cursor.coerceIn(0, text.length)
+        val ls = text.lastIndexOf('\n', c - 1) + 1
+        var le = text.indexOf('\n', c)
+        if (le == -1) le = text.length
+        val line = text.substring(ls, le)
+        val out = HashSet<String>()
+        heading.find(line)?.let { out.add("h" + it.groupValues[1].length) }
+        listItem.find(line)?.let { m ->
+            val mk = m.groupValues[2]
+            out.add(
+                when {
+                    mk.startsWith("- [") -> "task"
+                    mk[0].isDigit() -> "num"
+                    else -> "list"
+                },
+            )
+        }
+        val pos = c - ls
+        for (m in bold.findAll(line)) if (pos in m.range.first..m.range.last + 1) out.add("bold")
+        for (m in italic.findAll(line)) if (pos in m.range.first..m.range.last + 1) out.add("italic")
+        for (m in code.findAll(line)) if (pos in m.range.first..m.range.last + 1) out.add("code")
+        return out
     }
 
     /**

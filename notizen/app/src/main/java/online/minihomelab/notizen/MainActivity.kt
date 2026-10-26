@@ -39,6 +39,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Ui.init(this)
         if (hasAccess()) startApp() else showAccessScreen()
     }
 
@@ -59,7 +60,7 @@ class MainActivity : Activity() {
         if (!started) return
         val next = if (SchoolPlan.isConnected(this)) SchoolPlan.upcoming(this) else null
         currentLesson = next?.first
-        tree.setLesson(next?.let { SchoolPlan.label(it.first, it.second) })
+        tree.setLesson(next?.let { SchoolPlan.card(it.first, it.second) })
     }
 
     /** Karte angetippt: Fach-Ordner öffnen; beim ersten Mal (oder langem Drücken) Ordner zuordnen. */
@@ -102,28 +103,26 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(dp(32), dp(32), dp(32), dp(32))
-            setBackgroundColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(Ui.SURFACE)
         }
-        box.addView(TextView(this).apply {
-            text = "Zugriff auf den Gerätespeicher"
-            textSize = 20f
-            setTextColor(Ui.TEXT)
+        box.addView(Ui.label(this, "Zugriff auf den Gerätespeicher", 22f, Ui.TEXT, Ui.sansSemi).apply {
             gravity = Gravity.CENTER
         })
-        box.addView(TextView(this).apply {
-            text = "Deine Notizen liegen als normale .md-Dateien im Ordner „Notizen“ im Gerätespeicher. " +
-                "Sie bleiben beim Deinstallieren erhalten und lassen sich mit anderen Apps nutzen " +
-                "(Dateien, Syncthing, Termux). Dafür braucht die App Zugriff auf alle Dateien."
-            textSize = 15f
-            setTextColor(Ui.MUTED)
-            gravity = Gravity.CENTER
-            setPadding(0, dp(16), 0, dp(24))
-        }, LinearLayout.LayoutParams(dp(480), WRAP_CONTENT))
-        box.addView(Button(this).apply {
-            text = "Zugriff erlauben"
-            isAllCaps = false
-            setOnClickListener { requestAccess() }
-        })
+        box.addView(
+            Ui.label(
+                this,
+                "Deine Notizen liegen als normale .md-Dateien im Ordner „Notizen“ im Gerätespeicher. " +
+                    "Sie bleiben beim Deinstallieren erhalten und lassen sich mit anderen Apps nutzen " +
+                    "(Dateien, Syncthing, Termux). Dafür braucht die App Zugriff auf alle Dateien.",
+                15f, Ui.MUTED,
+            ).apply {
+                gravity = Gravity.CENTER
+                setLineSpacing(0f, 1.25f)
+                setPadding(0, dp(16), 0, dp(24))
+            },
+            LinearLayout.LayoutParams(dp(480), WRAP_CONTENT),
+        )
+        box.addView(Ui.primaryButton(this, "Zugriff erlauben", null) { requestAccess() }, LinearLayout.LayoutParams(dp(240), dp(48)))
         setContentView(box)
     }
 

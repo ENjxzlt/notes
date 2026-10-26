@@ -1,17 +1,22 @@
 package online.minihomelab.notizen
 
 import android.content.Context
+import android.graphics.drawable.Drawable
 import android.os.Handler
 import android.os.Looper
 import android.text.Editable
 import android.text.InputType
+import android.text.SpannableStringBuilder
+import android.text.Spanned
 import android.text.TextWatcher
+import android.text.style.ForegroundColorSpan
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.widget.EditText
 import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import java.io.File
@@ -39,19 +44,14 @@ class EditorPane(
     private var styledStart = -1
     private var styledEnd = -1
 
-    private val title = TextView(ctx).apply {
-        textSize = 14f
-        setTextColor(Ui.MUTED)
+    private val title = Ui.label(ctx, "", 13f, Ui.MUTED).apply {
         maxLines = 1
+        isSingleLine = true
+        ellipsize = android.text.TextUtils.TruncateAt.START
     }
-    private val status = TextView(ctx).apply {
-        textSize = 12f
-        setTextColor(Ui.MUTED)
-    }
-    private val hint = TextView(ctx).apply {
-        text = "Notiz links wählen oder neu anlegen."
-        setTextColor(Ui.MUTED)
-        textSize = 15f
+    private val statusIcon = Ui.icon(ctx, R.drawable.ic_check, Ui.FAINT, 14).apply { visibility = INVISIBLE }
+    private val status = Ui.label(ctx, "", 12f, Ui.FAINT, Ui.mono)
+    private val hint = Ui.label(ctx, "Notiz links wählen oder neu anlegen.", 15f, Ui.MUTED).apply {
         gravity = Gravity.CENTER
     }
     private val edit = NoteEdit(ctx).apply {
@@ -59,34 +59,48 @@ class EditorPane(
             InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         gravity = Gravity.TOP or Gravity.START
         background = null
+        typeface = Ui.sans
         textSize = 17f
         setTextColor(Ui.TEXT)
-        setLineSpacing(0f, 1.25f)
-        setPadding(ctx.dp(28), ctx.dp(20), ctx.dp(28), ctx.dp(20))
+        setLineSpacing(0f, 1.3f)
+        setPadding(ctx.dp(28), ctx.dp(24), ctx.dp(28), ctx.dp(24))
     }
     private val toolbar: View
 
+    /** Zustandsanzeige der Schnellleiste: Schlüssel wie bei MarkdownStyler.activeFormats. */
+    private val toolStates = HashMap<String, (Boolean) -> Unit>()
+
     init {
         orientation = VERTICAL
-        setBackgroundColor(0xFFFFFFFF.toInt())
+        setBackgroundColor(Ui.SURFACE)
 
         val header = LinearLayout(ctx).apply {
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(ctx.dp(8), 0, ctx.dp(16), 0)
-            if (showBack) addView(flatButton(ctx, "‹ Notizen") { onBack() })
-            addView(title, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
-                if (!showBack) leftMargin = ctx.dp(8)
-            })
+            setPadding(if (showBack) ctx.dp(4) else ctx.dp(28), 0, ctx.dp(28), 0)
+            if (showBack) {
+                addView(LinearLayout(ctx).apply {
+                    orientation = HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(ctx.dp(8), 0, ctx.dp(12), 0)
+                    background = Ui.ripple(ctx, null, 8)
+                    isClickable = true
+                    addView(Ui.icon(ctx, R.drawable.ic_chevron_left, Ui.ACCENT))
+                    addView(Ui.label(ctx, "Notizen", 15f, Ui.ACCENT, Ui.sansMedium))
+                    setOnClickListener { onBack() }
+                }, LayoutParams(LayoutParams.WRAP_CONTENT, ctx.dp(44)))
+            }
+            addView(title, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { if (showBack) leftMargin = ctx.dp(8) })
+            addView(statusIcon, LayoutParams(ctx.dp(14), ctx.dp(14)).apply { rightMargin = ctx.dp(6) })
             addView(status)
         }
-        addView(header, LayoutParams(LayoutParams.MATCH_PARENT, ctx.dp(48)))
+        addView(header, LayoutParams(LayoutParams.MATCH_PARENT, ctx.dp(52)))
         addView(hairline(ctx, false))
         addView(edit, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
         addView(hint, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
         addView(hairline(ctx, false))
         toolbar = buildToolbar(ctx)
-        addView(toolbar, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        addView(toolbar, LayoutParams(LayoutParams.MATCH_PARENT, ctx.dp(64)))
 
         edit.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
@@ -134,6 +148,7 @@ class EditorPane(
         styledStart = maxOf(0, edit.selectionStart)
         styledEnd = maxOf(0, edit.selectionEnd)
         MarkdownStyler.apply(e, styledStart, styledEnd)
+        updateToolbar(e)
     }
 
     private fun restyle() {
@@ -147,21 +162,81 @@ class EditorPane(
         }
     }
 
+    private fun updateToolbar(e: Editable) {
+        val active = MarkdownStyler.activeFormats(e.toString(), maxOf(0, edit.selectionStart))
+        for ((key, set) in toolStates) set(key in active)
+    }
+
+    // ---- Schnellleiste ----
+
     private fun buildToolbar(ctx: Context): View {
-        val row = LinearLayout(ctx).apply { orientation = HORIZONTAL }
-        fun b(label: String, action: () -> Unit) = row.addView(flatButton(ctx, label, action))
-        b("H1") { line("# ") }
-        b("H2") { line("## ") }
-        b("H3") { line("### ") }
-        b("Liste") { line("- ") }
-        b("Nummer") { line("1. ") }
-        b("Aufgabe") { line("- [ ] ") }
-        b("Fett") { wrapSel("**") }
-        b("Kursiv") { wrapSel("*") }
-        b("Code") { wrapSel("`") }
+        val row = LinearLayout(ctx).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(ctx.dp(16), 0, ctx.dp(16), 0)
+        }
+
+        fun setActive(v: View, on: Boolean) {
+            val bg: Drawable? = if (on) Ui.round(ctx, Ui.ACCENT_SOFT, 8) else null
+            v.background = Ui.ripple(ctx, bg, 8)
+        }
+
+        fun textButton(key: String, label: String, desc: String, mono: Boolean, style: Int, action: () -> Unit) {
+            val tv = Ui.label(ctx, label, if (mono) 14f else 17f, Ui.TEXT2, if (mono) Ui.monoMedium else Ui.sans).apply {
+                gravity = Gravity.CENTER
+                contentDescription = desc
+                isClickable = true
+                setOnClickListener { action() }
+                if (style == 1) typeface = Ui.sansSemi
+                if (style == 2) typeface = Ui.sansItalic
+            }
+            setActive(tv, false)
+            toolStates[key] = { on ->
+                setActive(tv, on)
+                tv.setTextColor(if (on) Ui.ACCENT else Ui.TEXT2)
+            }
+            row.addView(tv, LayoutParams(ctx.dp(44), ctx.dp(44)))
+        }
+
+        fun iconButton(key: String, res: Int, desc: String, action: () -> Unit) {
+            val iv = ImageView(ctx).apply {
+                setImageResource(res)
+                setColorFilter(Ui.TEXT2)
+                scaleType = ImageView.ScaleType.CENTER
+                contentDescription = desc
+                isClickable = true
+                setOnClickListener { action() }
+            }
+            setActive(iv, false)
+            toolStates[key] = { on ->
+                setActive(iv, on)
+                iv.setColorFilter(if (on) Ui.ACCENT else Ui.TEXT2)
+            }
+            row.addView(iv, LayoutParams(ctx.dp(44), ctx.dp(44)))
+        }
+
+        fun divider() {
+            row.addView(View(ctx).apply { setBackgroundColor(Ui.BORDER) }, LayoutParams(1, ctx.dp(24)).apply {
+                leftMargin = ctx.dp(8)
+                rightMargin = ctx.dp(8)
+            })
+        }
+
+        textButton("h1", "H1", "Überschrift 1", true, 0) { line("# ") }
+        textButton("h2", "H2", "Überschrift 2", true, 0) { line("## ") }
+        textButton("h3", "H3", "Überschrift 3", true, 0) { line("### ") }
+        divider()
+        iconButton("list", R.drawable.ic_list, "Liste") { line("- ") }
+        textButton("num", "1.", "Nummerierte Liste", true, 0) { line("1. ") }
+        iconButton("task", R.drawable.ic_task, "Aufgabe") { line("- [ ] ") }
+        divider()
+        textButton("bold", "B", "Fett", false, 1) { wrapSel("**") }
+        textButton("italic", "I", "Kursiv", false, 2) { wrapSel("*") }
+        iconButton("code", R.drawable.ic_code, "Code") { wrapSel("`") }
+
         return HorizontalScrollView(ctx).apply {
             isHorizontalScrollBarEnabled = false
-            addView(row)
+            addView(row, android.widget.FrameLayout.LayoutParams(android.widget.FrameLayout.LayoutParams.WRAP_CONTENT, android.widget.FrameLayout.LayoutParams.MATCH_PARENT))
         }
     }
 
@@ -177,6 +252,32 @@ class EditorPane(
         edit.setSelection(s, t)
     }
 
+    // ---- Notiz öffnen/schließen/speichern ----
+
+    private fun crumbs(f: File): CharSequence {
+        val parts = store.rel(f).split(" › ")
+        val sb = SpannableStringBuilder()
+        parts.forEachIndexed { i, p ->
+            if (i > 0) {
+                val s = sb.length
+                sb.append("  ›  ")
+                sb.setSpan(ForegroundColorSpan(Ui.FAINT), s, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+            val s = sb.length
+            sb.append(p)
+            if (i == parts.lastIndex) {
+                sb.setSpan(ForegroundColorSpan(Ui.TEXT), s, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                sb.setSpan(FontSpan(Ui.sansMedium), s, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+        }
+        return sb
+    }
+
+    private fun setStatus(text: String, showCheck: Boolean) {
+        status.text = text
+        statusIcon.visibility = if (showCheck) VISIBLE else INVISIBLE
+    }
+
     fun open(f: File) {
         flush()
         file = f
@@ -185,8 +286,8 @@ class EditorPane(
         loading = false
         dirty = false
         edit.setSelection(edit.text.length)
-        title.text = store.rel(f)
-        status.text = ""
+        title.text = crumbs(f)
+        setStatus("", false)
         edit.visibility = VISIBLE
         toolbar.visibility = VISIBLE
         hint.visibility = GONE
@@ -208,7 +309,7 @@ class EditorPane(
 
     private fun showEmpty() {
         title.text = ""
-        status.text = ""
+        setStatus("", false)
         edit.visibility = GONE
         toolbar.visibility = GONE
         hint.visibility = VISIBLE
@@ -216,7 +317,7 @@ class EditorPane(
 
     private fun scheduleSave() {
         dirty = true
-        status.text = "…"
+        setStatus("…", false)
         handler.removeCallbacks(saveRunnable)
         handler.postDelayed(saveRunnable, 700)
     }
@@ -228,14 +329,14 @@ class EditorPane(
         try {
             store.write(f, edit.text.toString())
             dirty = false
-            status.text = "Gespeichert"
+            setStatus("Gespeichert", true)
         } catch (e: Exception) {
-            status.text = "Speichern fehlgeschlagen"
+            setStatus("Speichern fehlgeschlagen", false)
         }
     }
 }
 
-/** EditText, das Cursorbewegungen meldet und Antippen von Aufgaben-Kästchen umschaltet. */
+/** EditText, das Cursorbewegungen meldet, Antippen von Aufgaben-Kästchen umschaltet und den Text mittig hält. */
 private class NoteEdit(ctx: Context) : EditText(ctx) {
     var onSelection: (() -> Unit)? = null
     private var pendingBox: MdCheckbox? = null
@@ -243,6 +344,13 @@ private class NoteEdit(ctx: Context) : EditText(ctx) {
     override fun onSelectionChanged(selStart: Int, selEnd: Int) {
         super.onSelectionChanged(selStart, selEnd)
         onSelection?.invoke()
+    }
+
+    /** Auf breiten Bildschirmen eine gut lesbare Spalte (max. 700 dp) in der Mitte. */
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        val side = maxOf(context.dp(28), (w - context.dp(700)) / 2)
+        if (paddingLeft != side) setPadding(side, paddingTop, side, paddingBottom)
     }
 
     override fun onTouchEvent(ev: MotionEvent): Boolean {

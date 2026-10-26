@@ -148,12 +148,21 @@ object SchoolPlan {
 
     private val timeFmt = DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault())
 
-    fun label(l: Lesson, running: Boolean): String {
-        val head = if (running) "Jetzt" else "Als Nächstes ${timeFmt.format(Instant.ofEpochMilli(l.start))}"
-        val period = if (l.period > 0) " · ${l.period}. Std" else ""
-        val room = if (l.room.isNotEmpty()) " · ${l.room}" else ""
-        val changed = if (l.changed) " (Vertretung)" else ""
-        return "$head$period · ${l.subject}$room$changed"
+    /** Inhalt der Stundenkarte oben im Baum. */
+    class Card(val head: String, val title: String, val sub: String)
+
+    fun card(l: Lesson, running: Boolean): Card {
+        val head = buildString {
+            append(if (running) "Jetzt" else "Als Nächstes")
+            if (l.period > 0) append(" · ${l.period}. Std")
+            append(" · ${timeFmt.format(Instant.ofEpochMilli(l.start))}–${timeFmt.format(Instant.ofEpochMilli(l.end))}")
+        }
+        val sub = listOfNotNull(
+            l.room.takeIf { it.isNotEmpty() }?.let { "Raum $it" },
+            l.teacher.takeIf { it.isNotEmpty() && it != "---" },
+            if (l.changed) "Vertretung" else null,
+        ).joinToString(" · ")
+        return Card(head, l.subject, sub)
     }
 
     // ---- Zuordnung Fach-Kürzel → Ordner ----
