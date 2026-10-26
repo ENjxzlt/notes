@@ -13,6 +13,7 @@ import android.text.style.RelativeSizeSpan
 import android.text.style.ReplacementSpan
 import android.text.style.StrikethroughSpan
 import android.graphics.Typeface
+import java.io.File
 
 // Eigene Span-Klassen, damit wir beim Neuformatieren genau diese und nichts anderes entfernen
 interface MdSpan
@@ -62,6 +63,34 @@ class MdCheckbox(val checked: Boolean) : ReplacementSpan(), MdSpan {
     }
 }
 
+/** Zeichnung der Notiz: ersetzt die Zeile `![Zeichnung](.ink/<id>.svg)` durch die gerenderte Seite. */
+class MdInk(val id: String, private val noteDir: File?) : ReplacementSpan(), MdSpan {
+    companion object {
+        /** Breite des Textbereichs in Pixeln, setzt NoteEdit. */
+        var blockWidth = 700
+    }
+
+    private fun bitmap() = noteDir?.let { Ink.thumb(it, id, blockWidth.coerceAtLeast(200)) }
+
+    override fun getSize(paint: Paint, text: CharSequence?, start: Int, end: Int, fm: Paint.FontMetricsInt?): Int {
+        val bm = bitmap()
+        if (fm != null && bm != null) {
+            fm.ascent = -bm.height
+            fm.top = fm.ascent
+            fm.descent = 0
+            fm.bottom = 0
+        }
+        return blockWidth.coerceAtLeast(200)
+    }
+
+    override fun draw(
+        canvas: Canvas, text: CharSequence?, start: Int, end: Int,
+        x: Float, top: Int, y: Int, bottom: Int, paint: Paint,
+    ) {
+        bitmap()?.let { canvas.drawBitmap(it, x, top.toFloat(), null) }
+    }
+}
+
 /** "- " bzw. "* " als kleiner Akzent-Punkt statt Strich. */
 class MdBullet : ReplacementSpan(), MdSpan {
     override fun getSize(paint: Paint, text: CharSequence?, start: Int, end: Int, fm: Paint.FontMetricsInt?): Int =
@@ -101,6 +130,10 @@ object MarkdownStyler {
     private val bold = Regex("\\*\\*(.+?)\\*\\*")
     private val italic = Regex("(?<![*\\w])\\*(?![*\\s])(.+?)(?<![*\\s])\\*(?![*\\w])")
     private val code = Regex("`([^`]+)`")
+    private val inkLine = Regex("^!\\[[^\\]]*\\]\\(\\.ink/([A-Za-z0-9_-]+)\\.svg\\)$")
+
+    /** Ordner der geöffneten Notiz (dort liegt `.ink`). */
+    var noteDir: File? = null
 
     private fun Editable.mark(span: Any, s: Int, e: Int) {
         if (e > s) setSpan(span, s, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
@@ -123,6 +156,8 @@ object MarkdownStyler {
             } else if (inFence) {
                 e.mark(MdFont(Ui.mono), pos, end)
                 e.mark(MdBg(Ui.SUBTLE), pos, end)
+            } else if (inkLine.matches(line)) {
+                e.mark(MdInk(inkLine.find(line)!!.groupValues[1], noteDir), pos, end)
             } else {
                 styleLine(e, line, pos, end, selStart, selEnd)
             }

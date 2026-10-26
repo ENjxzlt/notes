@@ -30,6 +30,7 @@ class EditorPane(
     private val store: NoteStore,
     private val showBack: Boolean,
     private val onBack: () -> Unit,
+    private val onInk: (noteDir: File, id: String) -> Unit,
 ) : LinearLayout(ctx) {
 
     var file: File? = null
@@ -62,7 +63,7 @@ class EditorPane(
         typeface = Ui.sans
         textSize = 17f
         setTextColor(Ui.TEXT)
-        setLineSpacing(0f, 1.3f)
+        setLineSpacing(ctx.dp(6).toFloat(), 1.0f) // Zusatzabstand statt Faktor: Zeichnungen sollen nicht mitgestreckt werden
         setPadding(ctx.dp(28), ctx.dp(24), ctx.dp(28), ctx.dp(24))
     }
     private val toolbar: View
@@ -128,6 +129,7 @@ class EditorPane(
 
         // Cursor bewegt: Markdown-Zeichen im aktuellen Wort/Zeile ein-, anderswo ausblenden (verzögert, nie mitten im Tippen)
         edit.onSelection = { edit.post { restyle() } }
+        edit.onInkTap = { id -> file?.parentFile?.let { onInk(it, id) } }
 
         edit.setOnKeyListener { _, code, ev ->
             if (ev.action != KeyEvent.ACTION_DOWN || !ev.isCtrlPressed) return@setOnKeyListener false
@@ -233,11 +235,58 @@ class EditorPane(
         textButton("bold", "B", "Fett", false, 1) { wrapSel("**") }
         textButton("italic", "I", "Kursiv", false, 2) { wrapSel("*") }
         iconButton("code", R.drawable.ic_code, "Code") { wrapSel("`") }
+        divider()
+        iconButton("ink", R.drawable.ic_pen, "Zeichnung einfügen") { insertInk() }
 
         return HorizontalScrollView(ctx).apply {
             isHorizontalScrollBarEnabled = false
             addView(row, android.widget.FrameLayout.LayoutParams(android.widget.FrameLayout.LayoutParams.WRAP_CONTENT, android.widget.FrameLayout.LayoutParams.MATCH_PARENT))
         }
+    }
+
+    /** Neue Zeichnung in einer eigenen Zeile an der Cursorposition einfügen und gleich öffnen. */
+    private fun insertInk() {
+        val f = file ?: return
+        val dir = f.parentFile ?: return
+        val id = Ink.newId()
+        try {
+            Ink.save(dir, id, InkDoc())
+        } catch (e: Exception) {
+            setStatus("Zeichnung nicht anlegbar", false)
+            return
+        }
+        val e = edit.text
+        val c = edit.selectionStart.coerceAtLeast(0)
+        val lineStart = e.toString().lastIndexOf('\n', c - 1) + 1
+        val lead = if (c > lineStart) "\n" else ""
+        e.insert(c, "$lead![Zeichnung](.ink/$id.svg)\n")
+        onInk(dir, id)
+    }
+
+    /** Nach dem Bearbeiten: Vorschau neu laden (Höhe kann sich geändert haben). */
+    fun refreshInk(id: String) {
+        file?.parentFile?.let { Ink.invalidate(id) }
+        if (file == null) return
+        busy = true
+        try {
+            applyStyle(edit.text)
+        } finally {
+            busy = false
+        }
+        edit.requestLayout()
+        edit.invalidate()
+    }
+
+    /** Zeichnung aus der Notiz entfernen (Zeile und Dateien). */
+    fun removeInk(dir: File, id: String) {
+        val e = edit.text
+        val marker = "![Zeichnung](.ink/$id.svg)"
+        val i = e.toString().indexOf(marker)
+        if (i >= 0) {
+            val end = minOf(e.length, i + marker.length + if (e.length > i + marker.length && e[i + marker.length] == '\n') 1 else 0)
+            e.delete(i, end)
+        }
+        Ink.delete(dir, id)
     }
 
     private fun line(prefix: String) {
@@ -281,6 +330,7 @@ class EditorPane(
     fun open(f: File) {
         flush()
         file = f
+        MarkdownStyler.noteDir = f.parentFile
         loading = true
         edit.setText(store.read(f))
         loading = false
@@ -339,7 +389,9 @@ class EditorPane(
 /** EditText, das Cursorbewegungen meldet, Antippen von Aufgaben-Kästchen umschaltet und den Text mittig hält. */
 private class NoteEdit(ctx: Context) : EditText(ctx) {
     var onSelection: (() -> Unit)? = null
+    var onInkTap: ((String) -> Unit)? = null
     private var pendingBox: MdCheckbox? = null
+    private var pendingInk: String? = null
 
     override fun onSelectionChanged(selStart: Int, selEnd: Int) {
         super.onSelectionChanged(selStart, selEnd)
@@ -351,26 +403,46 @@ private class NoteEdit(ctx: Context) : EditText(ctx) {
         super.onSizeChanged(w, h, oldw, oldh)
         val side = maxOf(context.dp(28), (w - context.dp(700)) / 2)
         if (paddingLeft != side) setPadding(side, paddingTop, side, paddingBottom)
+        MdInk.blockWidth = w - 2 * side
     }
 
     override fun onTouchEvent(ev: MotionEvent): Boolean {
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 pendingBox = boxAt(ev.x, ev.y)
-                if (pendingBox != null) return true
+                pendingInk = if (pendingBox == null) inkAt(ev.x, ev.y) else null
+                if (pendingBox != null || pendingInk != null) return true
             }
             MotionEvent.ACTION_UP -> {
                 val box = pendingBox
+                val ink = pendingInk
                 pendingBox = null
+                pendingInk = null
                 if (box != null) {
                     if (boxAt(ev.x, ev.y) === box) toggle(box)
                     return true
                 }
+                if (ink != null) {
+                    if (inkAt(ev.x, ev.y) == ink) onInkTap?.invoke(ink)
+                    return true
+                }
             }
-            MotionEvent.ACTION_CANCEL -> pendingBox = null
-            else -> if (pendingBox != null) return true
+            MotionEvent.ACTION_CANCEL -> {
+                pendingBox = null
+                pendingInk = null
+            }
+            else -> if (pendingBox != null || pendingInk != null) return true
         }
         return super.onTouchEvent(ev)
+    }
+
+    /** Zeichnung unter dem Finger/Stift (die ganze Fläche des Blocks zählt). */
+    private fun inkAt(x: Float, y: Float): String? {
+        val l = layout ?: return null
+        val ed = text ?: return null
+        val line = l.getLineForVertical((y - totalPaddingTop + scrollY).toInt())
+        val sp = ed.getSpans(l.getLineStart(line), l.getLineEnd(line), MdInk::class.java).firstOrNull() ?: return null
+        return sp.id
     }
 
     private fun boxAt(x: Float, y: Float): MdCheckbox? {

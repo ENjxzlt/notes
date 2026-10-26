@@ -17,6 +17,7 @@ import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -28,6 +29,10 @@ class MainActivity : Activity() {
     private lateinit var editor: EditorPane
     private var wide = false
     private var started = false
+    private lateinit var frame: FrameLayout
+    private var inkScreen: InkScreen? = null
+    private var inkDir: File? = null
+    private var inkId: String? = null
     private var currentLesson: SchoolPlan.Lesson? = null
     private val handler = Handler(Looper.getMainLooper())
     private val ticker = object : Runnable {
@@ -136,7 +141,7 @@ class MainActivity : Activity() {
         wide = resources.configuration.screenWidthDp >= 720
 
         tree = TreePane(this, store, ::openNote, ::onRemoved, ::moreMenu, ::onLessonCard)
-        editor = EditorPane(this, store, showBack = !wide, onBack = ::showTree)
+        editor = EditorPane(this, store, showBack = !wide, onBack = ::showTree, onInk = ::openInk)
 
         val root = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         if (wide) {
@@ -148,7 +153,9 @@ class MainActivity : Activity() {
             root.addView(editor, LinearLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
             editor.visibility = View.GONE
         }
-        setContentView(root)
+        frame = FrameLayout(this)
+        frame.addView(root, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        setContentView(frame)
         Updater.check(this)
 
         if (wide) {
@@ -169,6 +176,36 @@ class MainActivity : Activity() {
         // Als Sicherheitskopie im App-Speicher stehen lassen, aber nicht nochmal kopieren
         old.renameTo(File(filesDir, "notizen-migriert"))
         if (hadNotes) Toast.makeText(this, "Notizen in den Ordner „Notizen“ verschoben", Toast.LENGTH_LONG).show()
+    }
+
+    // ---- Zeichnen ----
+
+    private fun openInk(noteDir: File, id: String) {
+        if (inkScreen != null) return
+        editor.flush()
+        val doc = Ink.load(noteDir, id)
+        val screen = InkScreen(
+            this, doc,
+            onDone = { closeInk(save = true) },
+            onDelete = {
+                closeInk(save = false)
+                editor.removeInk(noteDir, id)
+            },
+        )
+        inkScreen = screen
+        inkDir = noteDir
+        inkId = id
+        frame.addView(screen, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+    }
+
+    private fun closeInk(save: Boolean) {
+        val screen = inkScreen ?: return
+        val dir = inkDir ?: return
+        val id = inkId ?: return
+        if (save) Ink.save(dir, id, screen.doc)
+        frame.removeView(screen)
+        inkScreen = null
+        editor.refreshInk(id)
     }
 
     private fun openNote(f: File) {
@@ -217,13 +254,17 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         handler.removeCallbacks(ticker)
+        // Offene Zeichnung nicht verlieren, wenn die App in den Hintergrund geht
+        inkScreen?.let { s -> inkDir?.let { d -> inkId?.let { i -> Ink.save(d, i, s.doc) } } }
         if (started) editor.flush()
         super.onPause()
     }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (!started) {
+        if (inkScreen != null) {
+            closeInk(save = true)
+        } else if (!started) {
             @Suppress("DEPRECATION")
             super.onBackPressed()
         } else if (!wide && editor.visibility == View.VISIBLE) {
