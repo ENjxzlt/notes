@@ -574,7 +574,10 @@ class EditorPane(
                 val ts = java.text.SimpleDateFormat("yyyy-MM-dd HH.mm", java.util.Locale.GERMANY).format(java.util.Date())
                 var copy = File(f.parentFile, "${f.nameWithoutExtension} (Konflikt $ts).md")
                 var n = 1
-                while (copy.exists()) copy = File(f.parentFile, "${f.nameWithoutExtension} (Konflikt $ts $n++).md")
+                while (copy.exists()) {
+                    copy = File(f.parentFile, "${f.nameWithoutExtension} (Konflikt $ts $n).md")
+                    n++
+                }
                 store.write(copy, edit.text.toString())
                 reloadFromDisk(f)
                 setStatus("Konflikt: Kopie angelegt", false)
