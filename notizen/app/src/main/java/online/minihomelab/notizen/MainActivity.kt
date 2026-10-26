@@ -184,11 +184,20 @@ class MainActivity : Activity() {
     }
 
     private fun moreMenu() {
+        // Achtung: setMessage und setItems schließen sich in AlertDialog aus (die Einträge würden nicht angezeigt)
         AlertDialog.Builder(this)
             .setTitle("Notizen · Build ${Updater.installedVersion(this)}")
-            .setMessage("Ordner: ${store.root.path}")
-            .setItems(arrayOf("Nach Updates suchen", "Stundenplan von Slotwise verbinden")) { _, which ->
-                if (which == 0) Updater.check(this, manual = true) else SchoolPlan.connect(this) { updateCard() }
+            .setItems(
+                arrayOf(
+                    "Nach Updates suchen",
+                    "Stundenplan von Slotwise verbinden",
+                    "Ordner: ${store.root.path}",
+                ),
+            ) { _, which ->
+                when (which) {
+                    0 -> Updater.check(this, manual = true)
+                    1 -> SchoolPlan.connect(this) { updateCard() }
+                }
             }
             .show()
     }
