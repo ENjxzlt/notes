@@ -1,0 +1,14 @@
+services:
+  notizen-server:
+    build: .
+    image: notizen-server:latest
+    container_name: notizen-server
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-3090}:3090"
+    env_file: .env
+    environment:
+      - TZ=${TZ:-Europe/Berlin}
+    volumes:
+      - ./data:/data
+networks: {}
