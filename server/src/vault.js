@@ -6,6 +6,7 @@
 // legt eine Kopie an. Nichts wird stillschweigend überschrieben.
 
 import { DatabaseSync } from 'node:sqlite';
+import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -44,6 +45,9 @@ const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 export class Vault {
   constructor(dataDir) {
     this.dataDir = dataDir;
+    /** 'change' bei jeder geschriebenen oder gelöschten Datei: speist den Live-Sync (SSE) */
+    this.events = new EventEmitter();
+    this.events.setMaxListeners(200);
     this.root = path.join(dataDir, 'vault');
     fs.mkdirSync(this.root, { recursive: true });
     this.db = new DatabaseSync(path.join(dataDir, 'notes.db'));
@@ -129,7 +133,9 @@ export class Vault {
       ON CONFLICT(path) DO UPDATE SET rev = excluded.rev, hash = excluded.hash, size = excluded.size,
         mtime = excluded.mtime, deleted = 0, seq = excluded.seq
     `).run(p, rev, hash, data.length, Date.now(), seq);
-    return { ok: true, info: Vault.#info(this.#row(p)) };
+    const info = Vault.#info(this.#row(p));
+    this.events.emit('change', info);
+    return { ok: true, info };
   }
 
   // ---- Verlauf: die letzten Fassungen jeder Datei, damit sich Änderungen (auch von Claude) zurücknehmen lassen ----
@@ -185,7 +191,9 @@ export class Vault {
     const seq = this.#nextSeq();
     this.db.prepare('UPDATE files SET rev = rev + 1, deleted = 1, hash = NULL, size = 0, mtime = ?, seq = ? WHERE path = ?')
       .run(Date.now(), seq, p);
-    return { ok: true, info: Vault.#info(this.#row(p)) };
+    const info = Vault.#info(this.#row(p));
+    this.events.emit('change', info);
+    return { ok: true, info };
   }
 
   /** Tägliche Sicherung: Kopie des Vaults und der Datenbank, die letzten [keep] Tage bleiben. */

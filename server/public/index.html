@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notizen</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='4' y='3' width='16' height='18' rx='3' fill='%231d4ed8'/%3E%3Cpath d='M8 9h8M8 13h8M8 17h5' stroke='white' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<section id="login" class="login" hidden>
+  <form id="loginForm" autocomplete="off">
+    <h1>Notizen</h1>
+    <p class="muted">Gib das Token deines Notizen-Servers ein (<code>NOTES_TOKEN</code>). Es bleibt nur in diesem Browser.</p>
+    <label for="tokenInput">Token</label>
+    <input id="tokenInput" type="password" autocomplete="current-password" required>
+    <p id="loginError" class="error" hidden></p>
+    <button type="submit" class="btn primary">Anmelden</button>
+  </form>
+</section>
+
+<div id="app" class="app" hidden>
+  <aside id="side" class="side">
+    <div class="side-head">
+      <strong>Notizen</strong>
+      <span class="grow"></span>
+      <button id="newBtn" class="btn small primary" type="button">Neue Notiz</button>
+    </div>
+    <label class="search"><span class="sr-only">Titel suchen</span>
+      <input id="search" type="search" placeholder="Titel suchen" autocomplete="off">
+    </label>
+    <nav id="tree" class="tree" aria-label="Notizen"></nav>
+    <div class="side-foot">
+      <span id="syncState" class="muted"></span>
+      <span class="grow"></span>
+      <button id="logoutBtn" class="btn small ghost" type="button">Abmelden</button>
+    </div>
+  </aside>
+
+  <main id="main" class="main">
+    <div id="empty" class="empty">Notiz links wählen oder neu anlegen.</div>
+
+    <div id="note" class="note" hidden>
+      <header class="bar">
+        <div id="crumb" class="crumb"></div>
+        <span class="grow"></span>
+        <span id="status" class="status muted"></span>
+        <div class="seg" role="group" aria-label="Ansicht">
+          <button type="button" data-view="edit">Bearbeiten</button>
+          <button type="button" data-view="both">Beides</button>
+          <button type="button" data-view="preview">Vorschau</button>
+        </div>
+        <button id="renameBtn" class="btn small ghost" type="button">Umbenennen</button>
+        <button id="deleteBtn" class="btn small ghost" type="button">Löschen</button>
+      </header>
+
+      <div id="banner" class="banner" hidden></div>
+
+      <div id="toolbar" class="toolbar" role="toolbar" aria-label="Formatierung">
+        <button type="button" data-act="h1" title="Überschrift 1 (Strg+1)">H1</button>
+        <button type="button" data-act="h2" title="Überschrift 2 (Strg+2)">H2</button>
+        <button type="button" data-act="h3" title="Überschrift 3 (Strg+3)">H3</button>
+        <span class="sep"></span>
+        <button type="button" data-act="ul" title="Liste">Liste</button>
+        <button type="button" data-act="ol" title="Nummerierte Liste">1.</button>
+        <button type="button" data-act="task" title="Aufgabe">Aufgabe</button>
+        <span class="sep"></span>
+        <button type="button" data-act="bold" title="Fett (Strg+B)"><b>B</b></button>
+        <button type="button" data-act="italic" title="Kursiv (Strg+I)"><i>I</i></button>
+        <button type="button" data-act="code" title="Code (Strg+E)">Code</button>
+      </div>
+
+      <div id="panes" class="panes" data-view="both">
+        <textarea id="editor" class="editor" spellcheck="true" aria-label="Notiztext"></textarea>
+        <article id="preview" class="preview"></article>
+      </div>
+
+      <section id="inkPanel" class="ink-panel" hidden>
+        <h3>Zeichnung vom Tablet</h3>
+        <p class="muted">Nur zum Ansehen. Die Striche liegen an festen Positionen der Tablet-Seite und sind hier nicht am Text ausgerichtet.</p>
+        <img id="inkImg" alt="Zeichnung der Notiz">
+      </section>
+    </div>
+  </main>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -332,3 +332,71 @@ object Sync {
 
     private fun toast(ctx: Context, msg: String) = Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
 }
+
+/**
+ * Live-Sync: hält, solange die App im Vordergrund ist, eine Verbindung zu `/api/events` offen. Der Server meldet jede
+ * Änderung (Tablet, PC, Claude) sofort, die App gleicht dann gleich ab. Bricht die Verbindung ab, wird neu verbunden
+ * (mit wachsender Wartezeit); beim Wiederverbinden gibt es sofort einen Abgleich, damit nichts verpasst wird.
+ */
+object Live {
+    @Volatile private var thread: Thread? = null
+    @Volatile private var generation = 0 // jede Verbindung gehört zu einer Generation; Stoppen macht alle alten ungültig
+    @Volatile private var conn: HttpURLConnection? = null
+
+    fun start(activity: Activity, onChange: () -> Unit) {
+        if (thread != null) return
+        val p = activity.getSharedPreferences("notizen-sync", Context.MODE_PRIVATE)
+        val base = p.getString("url", "") ?: ""
+        val token = p.getString("token", "") ?: ""
+        if (base.isEmpty() || token.isEmpty()) return
+        val mine = ++generation
+        thread = Thread {
+            var wait = 2_000L
+            while (mine == generation) {
+                try {
+                    val c = URL("$base/api/events").openConnection() as HttpURLConnection
+                    conn = c
+                    c.connectTimeout = 15_000
+                    c.readTimeout = 70_000 // der Server sendet alle 25 s ein Lebenszeichen
+                    c.setRequestProperty("Authorization", "Bearer $token")
+                    c.setRequestProperty("Accept", "text/event-stream")
+                    if (c.responseCode == 200) {
+                        wait = 2_000
+                        c.inputStream.bufferedReader().use { r ->
+                            var event = ""
+                            while (mine == generation) {
+                                val line = r.readLine() ?: break
+                                if (line.startsWith("event:")) {
+                                    event = line.substring(6).trim()
+                                } else if (line.isEmpty()) {
+                                    if (event == "change" || event == "hello") activity.runOnUiThread(onChange)
+                                    event = ""
+                                }
+                            }
+                        }
+                    }
+                    c.disconnect()
+                } catch (e: Exception) {
+                    // Verbindung weg: unten neu versuchen
+                }
+                if (mine != generation) break
+                try {
+                    Thread.sleep(wait)
+                } catch (e: InterruptedException) {
+                    break
+                }
+                wait = minOf(wait * 2, 60_000)
+            }
+        }.also {
+            it.isDaemon = true
+            it.start()
+        }
+    }
+
+    fun stop() {
+        generation++
+        conn?.disconnect() // beendet das blockierende Lesen
+        thread?.interrupt()
+        thread = null
+    }
+}

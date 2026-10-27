@@ -63,6 +63,13 @@ class MainActivity : Activity() {
         handler.post(ticker)
         if (SchoolPlan.isConnected(this)) SchoolPlan.refresh(this, onDone = ::updateCard)
         syncNow(false)
+        startLive()
+    }
+
+    /** Live-Sync nur im Vordergrund: der Server meldet Änderungen sofort. */
+    private fun startLive() {
+        Live.stop()
+        if (Sync.isConnected(this)) Live.start(this) { scheduleSync(300) }
     }
 
     /** Notizen mit dem Server abgleichen; nach dem Speichern verzögert, damit nicht jeder Tastendruck zählt. */
@@ -78,9 +85,9 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun scheduleSync() {
+    private fun scheduleSync(delayMs: Long = 2_000) {
         handler.removeCallbacks(syncRunnable)
-        handler.postDelayed(syncRunnable, 8_000)
+        handler.postDelayed(syncRunnable, delayMs)
     }
 
     private fun updateCard() {
@@ -251,7 +258,7 @@ class MainActivity : Activity() {
         }
         add("Nach Updates suchen") { Updater.check(this, manual = true) }
         add("Stundenplan von Slotwise verbinden") { SchoolPlan.connect(this) { updateCard() } }
-        add("Notizen-Server verbinden") { Sync.configure(this) { syncNow(true) } }
+        add("Notizen-Server verbinden") { Sync.configure(this) { syncNow(true); startLive() } }
         if (Sync.isConnected(this)) add("Jetzt synchronisieren (${Sync.lastStatus(this)})") { syncNow(true) }
         add("Ordner: ${store.root.path}") {}
         // Achtung: setMessage und setItems schließen sich in AlertDialog aus (die Einträge würden nicht angezeigt)
@@ -277,6 +284,7 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         handler.removeCallbacks(ticker)
+        Live.stop()
         // Offene Zeichnung nicht verlieren, wenn die App in den Hintergrund geht
         inkScreen?.let { s -> inkDir?.let { d -> inkId?.let { i -> Ink.save(d, i, s.doc) } } }
         if (started) editor.flush()

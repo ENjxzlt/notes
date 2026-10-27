@@ -2,15 +2,18 @@ import express from 'express';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { mountOAuth } from './oauth.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { Vault, HttpError, MAX_SIZE } from './vault.js';
 import { buildMcpServer } from './mcp.js';
 
 /**
- * Baut die App; [token] ist das gemeinsame Geheimnis der Geräte, [mcpToken] (optional) schaltet den MCP-Zugang für Claude
+ * Baut die App; opts.publicUrl (https://…) schaltet zusätzlich OAuth für claude.ai-Connectors frei, opts.redirectHosts
+ * erlaubt weitere Hosts für die Weiterleitung nach der Freigabe (Standard: claude.ai, claude.com).
+ * [token] ist das gemeinsame Geheimnis der Geräte, [mcpToken] (optional) schaltet den MCP-Zugang für Claude
  * frei und ist ein eigenes Geheimnis, damit sich beides getrennt widerrufen lässt.
  */
-export function createApp(vault, token, mcpToken = '') {
+export function createApp(vault, token, mcpToken = '', opts = {}) {
   const app = express();
   app.disable('x-powered-by');
 
@@ -26,16 +29,42 @@ export function createApp(vault, token, mcpToken = '') {
     else a.count++;
   };
 
+  // Web-Ansicht für den PC (statische Dateien); Zugriff auf Notizen erst über die API mit Token
+  const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
+  app.use((req, res, next) => {
+    res.set({
+      'Content-Security-Policy': "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
+    });
+    next();
+  });
+  app.use(express.static(publicDir, { index: 'index.html', maxAge: 0 }));
+
   app.get('/api/health', (req, res) => res.json({ ok: true }));
 
-  // ---- MCP für Claude (nur mit eigenem Token) ----
+  // ---- MCP für Claude (nur mit eigenem Token; mit publicUrl zusätzlich als OAuth-Connector für claude.ai) ----
+  let oauth = null;
   if (mcpToken) {
     const wantedMcp = Buffer.from(mcpToken);
+    if (opts.publicUrl) {
+      oauth = mountOAuth(app, {
+        db: vault.db,
+        publicUrl: opts.publicUrl,
+        password: mcpToken,
+        limited,
+        fail,
+        redirectHosts: opts.redirectHosts || ['claude.ai', 'claude.com'],
+      });
+    }
     const mcpAuth = (req, res, next) => {
       if (limited(req.ip)) return res.status(429).json({ error: 'Zu viele Fehlversuche' });
-      const given = Buffer.from((req.headers.authorization || '').replace(/^Bearer\s+/i, ''));
+      const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+      const given = Buffer.from(bearer);
       if (given.length === wantedMcp.length && crypto.timingSafeEqual(given, wantedMcp)) return next();
+      if (oauth?.verify(bearer)) return next();
       fail(req.ip);
+      if (oauth) res.set('WWW-Authenticate', `Bearer resource_metadata="${oauth.resourceMetadataUrl}"`);
       res.status(401).json({ error: 'Nicht angemeldet' });
     };
     app.post('/mcp', mcpAuth, express.json({ limit: '3mb' }), async (req, res) => {
@@ -66,6 +95,26 @@ export function createApp(vault, token, mcpToken = '') {
     if (given.length === wanted.length && crypto.timingSafeEqual(given, wanted)) return next();
     fail(ip);
     res.status(401).json({ error: 'Nicht angemeldet' });
+  });
+
+  // Live-Sync: Server-Sent Events. Jede Änderung (Tablet, PC, Claude) wird sofort gemeldet, die Geräte laden dann nach.
+  app.get('/api/events', (req, res) => {
+    res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+    res.flushHeaders();
+    res.write(`event: hello\ndata: ${JSON.stringify({ seq: vault.seq })}\n\n`);
+    const onChange = (info) => res.write(`event: change\ndata: ${JSON.stringify({ seq: info.seq, path: info.path })}\n\n`);
+    vault.events.on('change', onChange);
+    const beat = setInterval(() => res.write(': keep-alive\n\n'), 25_000);
+    req.on('close', () => {
+      clearInterval(beat);
+      vault.events.off('change', onChange);
+    });
+  });
+
+  // Nimmt allen claude.ai-Connectors den Zugang (OAuth-Tokens und -Registrierungen löschen)
+  app.post('/api/oauth/revoke-all', (req, res) => {
+    oauth?.revokeAll();
+    res.json({ ok: true });
   });
 
   const q = (req, name) => String(req.query[name] ?? '');
@@ -131,7 +180,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.error('MCP_TOKEN muss sich von NOTES_TOKEN unterscheiden.');
     process.exit(1);
   }
-  createApp(vault, token, mcpToken).listen(port, () => console.log(`Notizen-Server läuft auf Port ${port}${mcpToken ? ' (MCP für Claude aktiv)' : ''}`));
+  const publicUrl = (process.env.PUBLIC_URL || '').trim();
+  if (publicUrl && !/^https:\/\//.test(publicUrl)) {
+    console.error('PUBLIC_URL muss mit https:// beginnen.');
+    process.exit(1);
+  }
+  const redirectHosts = (process.env.OAUTH_REDIRECT_HOSTS || 'claude.ai,claude.com').split(',').map((h) => h.trim()).filter(Boolean);
+  createApp(vault, token, mcpToken, { publicUrl, redirectHosts }).listen(port, () => console.log(`Notizen-Server läuft auf Port ${port}${mcpToken ? (publicUrl ? ' (MCP + OAuth-Connector aktiv)' : ' (MCP mit Token aktiv)') : ''}`));
 
   const backup = () => {
     try {
