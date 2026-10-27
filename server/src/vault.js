@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const MAX_SIZE = 25 * 1024 * 1024;
+const KEEP_VERSIONS = 30;
 
 export class HttpError extends Error {
   constructor(status, message, extra = {}) {
@@ -115,6 +116,7 @@ export class Vault {
     if (!okBase) throw new HttpError(409, 'Konflikt', { conflict: true, current: row ? Vault.#info(row) : null });
 
     const file = this.#file(p);
+    if (row && !row.deleted) this.#snapshot(p, row.rev);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const tmp = `${file}.tmp`;
     fs.writeFileSync(tmp, data);
@@ -128,6 +130,48 @@ export class Vault {
         mtime = excluded.mtime, deleted = 0, seq = excluded.seq
     `).run(p, rev, hash, data.length, Date.now(), seq);
     return { ok: true, info: Vault.#info(this.#row(p)) };
+  }
+
+  // ---- Verlauf: die letzten Fassungen jeder Datei, damit sich Änderungen (auch von Claude) zurücknehmen lassen ----
+
+  #historyDir(p) {
+    return path.join(this.dataDir, 'history', ...p.split('/'));
+  }
+
+  #snapshot(p, rev) {
+    const src = this.#file(p);
+    if (!fs.existsSync(src)) return;
+    const dir = this.#historyDir(p);
+    fs.mkdirSync(dir, { recursive: true });
+    const ext = path.extname(p);
+    fs.copyFileSync(src, path.join(dir, `${String(Date.now()).padStart(14, '0')}-r${rev}${ext}`));
+    const all = fs.readdirSync(dir).sort();
+    for (const old of all.slice(0, Math.max(0, all.length - KEEP_VERSIONS))) fs.rmSync(path.join(dir, old), { force: true });
+  }
+
+  /** Frühere Fassungen einer Datei, neueste zuerst: [{id, rev, time, size}] */
+  versions(p) {
+    checkPath(p);
+    const dir = this.#historyDir(p);
+    if (!fs.existsSync(dir)) return [];
+    return fs.readdirSync(dir).sort().reverse().map((name) => {
+      const m = /^(\d+)-r(\d+)/.exec(name);
+      return { id: name, rev: m ? Number(m[2]) : 0, time: m ? Number(m[1]) : 0, size: fs.statSync(path.join(dir, name)).size };
+    });
+  }
+
+  readVersion(p, id) {
+    checkPath(p);
+    if (!/^\d+-r\d+\.[a-z]+$/.test(id)) throw new HttpError(400, 'Ungültige Version');
+    const f = path.join(this.#historyDir(p), id);
+    if (!fs.existsSync(f)) throw new HttpError(404, 'Version nicht gefunden');
+    return fs.readFileSync(f);
+  }
+
+  /** Alle vorhandenen Dateien (ohne Grabsteine), optional unter einem Ordner. */
+  list(prefix = '') {
+    const rows = this.db.prepare('SELECT * FROM files WHERE deleted = 0 ORDER BY path').all();
+    return rows.filter((r) => !prefix || r.path.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`)).map(Vault.#info);
   }
 
   /** Löscht eine Datei (Grabstein bleibt, damit andere Geräte das Löschen erfahren). */

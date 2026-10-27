@@ -23,6 +23,27 @@ verteilt Änderungen an alle Geräte. Gedacht für den TrueNAS-Server neben Slot
 
 Erlaubt sind `.md` überall sowie `.json`/`.svg` nur in `.ink`-Ordnern (Zeichnungen); höchstens 25 MB je Datei.
 
+## Claude-Zugriff (MCP)
+Wenn `MCP_TOKEN` in der `.env` gesetzt ist, spricht der Server unter `/mcp` das MCP-Protokoll (Streamable HTTP, zustandslos).
+Ohne `MCP_TOKEN` gibt es den Zugang nicht. Das Token ist **ein eigenes Geheimnis**, unabhängig von `NOTES_TOKEN`: Du kannst Claude
+den Zugang nehmen (Token löschen, Container neu starten), ohne die Geräte neu zu verbinden.
+
+Werkzeuge: `list_notes`, `read_note`, `search_notes`, `write_note`, `append_note`, `list_versions`, `restore_version`.
+Bewusst **kein Löschen** und nur Markdown-Notizen (keine Zeichnungen).
+
+Schutz vor Fehlern:
+- `write_note` überschreibt nur mit der gelesenen Revision, sonst „Konflikt" und nichts geht verloren (neue Notiz: Revision 0)
+- vor jeder Änderung bleibt die alte Fassung im Verlauf (`data/history/…`, die letzten 30 je Datei), `restore_version` holt sie zurück
+- jede schreibende Aktion steht in `data/mcp-audit.log`
+- Änderungen von Claude laufen über denselben Sync wie deine eigenen: Das Tablet bekommt sie beim nächsten Abgleich
+
+Mit Claude Code verbinden (auf dem Tablet in Termux oder am PC):
+```
+claude mcp add --transport http notizen https://notizen.minihomelab.online/mcp --header "Authorization: Bearer <MCP_TOKEN>"
+```
+Danach in Claude Code z. B.: „Fass meine Physik-Notizen von heute zusammen" oder „Hänge an Schule/Mathe/Ableitung.md eine Übungsaufgabe an".
+Claude greift nur zu, wenn du es in einer Sitzung verlangst. **Nicht** unterstützt: claude.ai-Connectors, die OAuth verlangen.
+
 ## Betrieb
 ```
 cp .env.example .env      # NOTES_TOKEN eintragen

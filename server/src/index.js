@@ -2,10 +2,15 @@ import express from 'express';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { Vault, HttpError, MAX_SIZE } from './vault.js';
+import { buildMcpServer } from './mcp.js';
 
-/** Baut die App; [token] ist das gemeinsame Geheimnis der Geräte. */
-export function createApp(vault, token) {
+/**
+ * Baut die App; [token] ist das gemeinsame Geheimnis der Geräte, [mcpToken] (optional) schaltet den MCP-Zugang für Claude
+ * frei und ist ein eigenes Geheimnis, damit sich beides getrennt widerrufen lässt.
+ */
+export function createApp(vault, token, mcpToken = '') {
   const app = express();
   app.disable('x-powered-by');
 
@@ -22,6 +27,37 @@ export function createApp(vault, token) {
   };
 
   app.get('/api/health', (req, res) => res.json({ ok: true }));
+
+  // ---- MCP für Claude (nur mit eigenem Token) ----
+  if (mcpToken) {
+    const wantedMcp = Buffer.from(mcpToken);
+    const mcpAuth = (req, res, next) => {
+      if (limited(req.ip)) return res.status(429).json({ error: 'Zu viele Fehlversuche' });
+      const given = Buffer.from((req.headers.authorization || '').replace(/^Bearer\s+/i, ''));
+      if (given.length === wantedMcp.length && crypto.timingSafeEqual(given, wantedMcp)) return next();
+      fail(req.ip);
+      res.status(401).json({ error: 'Nicht angemeldet' });
+    };
+    app.post('/mcp', mcpAuth, express.json({ limit: '3mb' }), async (req, res) => {
+      // zustandslos: je Anfrage ein eigener Server, nichts bleibt im Speicher
+      const server = buildMcpServer(vault, vault.dataDir);
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      res.on('close', () => {
+        transport.close();
+        server.close();
+      });
+      try {
+        await server.connect(transport);
+        await transport.handleRequest(req, res, req.body);
+      } catch (e) {
+        console.error(e);
+        if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Interner Fehler' }, id: null });
+      }
+    });
+    const notAllowed = (req, res) => res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Nur POST erlaubt' }, id: null });
+    app.get('/mcp', notAllowed);
+    app.delete('/mcp', notAllowed);
+  }
 
   app.use('/api', (req, res, next) => {
     const ip = req.ip;
@@ -86,7 +122,16 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   }
   const vault = new Vault(process.env.DATA_DIR || path.resolve('data'));
   const port = Number(process.env.PORT || 3090);
-  createApp(vault, token).listen(port, () => console.log(`Notizen-Server läuft auf Port ${port}`));
+  const mcpToken = process.env.MCP_TOKEN || '';
+  if (mcpToken && mcpToken.length < 24) {
+    console.error('MCP_TOKEN ist zu kurz (mindestens 24 Zeichen).');
+    process.exit(1);
+  }
+  if (mcpToken === token) {
+    console.error('MCP_TOKEN muss sich von NOTES_TOKEN unterscheiden.');
+    process.exit(1);
+  }
+  createApp(vault, token, mcpToken).listen(port, () => console.log(`Notizen-Server läuft auf Port ${port}${mcpToken ? ' (MCP für Claude aktiv)' : ''}`));
 
   const backup = () => {
     try {

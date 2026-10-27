@@ -26,9 +26,10 @@ Cloudflare-Tunnel anpassen, Android-Builds von Slotwise. Das erledigt ein lokale
 > **Schritt 1 – Notizen-Server ausrollen**
 > 1. Auf dem TrueNAS den Stack `/mnt/tank/stacks/notizen-server/` anlegen (Besitzer uid 1000, Unterordner `data`).
 > 2. Den Inhalt von `notes/server/` (ohne `node_modules`, `data`, `.env`) per tar über einen alpine-Container dorthin kopieren.
-> 3. `.env` auf dem Server erzeugen: `NOTES_TOKEN=$(openssl rand -hex 24)` und `TZ=Europe/Berlin`. Rechte `600`.
+> 3. `.env` auf dem Server erzeugen: `NOTES_TOKEN=$(openssl rand -hex 24)`, `MCP_TOKEN=$(openssl rand -hex 24)` (ein **anderer** Wert) und `TZ=Europe/Berlin`. Rechte `600`.
+>    Bei einem schon laufenden Stack: nur `MCP_TOKEN` ergänzen, die Dateien aus `notes/server/` neu kopieren und mit `up -d --build` neu bauen.
 > 4. Prüfen, dass Port 3090 frei ist (`sudo -n docker ps`), sonst `HOST_PORT` in der `.env` ändern.
-> 5. Tests in einem Wegwerf-Container: `sudo -n docker run --rm -v <Stack>:/app -w /app node:24-slim sh -c "npm install && npm test"` – es müssen alle 9 Tests bestehen.
+> 5. Tests in einem Wegwerf-Container: `sudo -n docker run --rm -v <Stack>:/app -w /app node:24-slim sh -c "npm install && npm test"` – es müssen alle 17 Tests bestehen.
 > 6. Starten: `sudo -n docker compose --project-directory /mnt/tank/stacks/notizen-server -f /mnt/tank/stacks/notizen-server/compose.yaml up -d --build`
 > 7. Prüfen: `curl http://192.168.178.179:3090/api/health` liefert `{"ok":true}`; ohne Token liefert `/api/changes?since=0` 401.
 >
@@ -38,6 +39,8 @@ Cloudflare-Tunnel anpassen, Android-Builds von Slotwise. Das erledigt ein lokale
 > 2. Prüfen: `curl https://notizen.minihomelab.online/api/health`.
 > 3. Ein Test-Roundtrip mit dem Token (Token nicht ausgeben, nur in einer Shell-Variable halten): eine Datei `Test/Sync.md`
 >    per PUT mit `base=0` anlegen, per GET lesen, per DELETE (`base` = Revision) wieder löschen.
+> 4. MCP prüfen: `POST https://notizen.minihomelab.online/mcp` ohne Token muss 401 liefern, mit dem **MCP_TOKEN** eine gültige
+>    MCP-Antwort (`tools/list`); mit dem NOTES_TOKEN muss es 401 geben.
 >
 > **Schritt 3 – Slotwise von `main` ausrollen**
 > 1. In `slotwise`: `git checkout main && git pull`.
@@ -50,6 +53,12 @@ Cloudflare-Tunnel anpassen, Android-Builds von Slotwise. Das erledigt ein lokale
 > **Schritt 4 – Bericht**
 > Schreib mir eine Liste: was läuft (Adressen, Ports), was fehlgeschlagen ist, was ich noch von Hand tun muss
 > (Token in die Notizen-App eintragen, Schulplan-Zugang in Slotwise eintragen).
+
+## Claude verbinden (Termux auf dem Tablet oder PC)
+```
+claude mcp add --transport http notizen https://notizen.minihomelab.online/mcp --header "Authorization: Bearer <MCP_TOKEN>"
+```
+Das MCP_TOKEN holst du dir von dem Agenten (er zeigt es einmal an) oder liest es in der `.env` auf dem Server.
 
 ## Danach von Hand (am Tablet)
 1. Notizen-App: **Mehr → Notizen-Server verbinden**, Adresse `https://notizen.minihomelab.online` und das Token eintragen.
