@@ -18,6 +18,7 @@ class Config:
     server: str = ''
     token: str = ''
     root: str = str(Path.home() / 'Notizen')
+    stt_command: str = ''  # Umschrift fürs Diktieren, {wav} = Aufnahme (siehe dictate.py)
 
     @property
     def ready(self) -> bool:

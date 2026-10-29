@@ -19,6 +19,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 from . import config as cfgmod  # noqa: E402
 from . import dash  # noqa: E402
 from . import editing, ideas_ui, nav, schoolplan  # noqa: E402
+from . import ink, ink_ui  # noqa: E402
 from . import inbox  # noqa: E402
 from .sync import AuthError, Client, ServerError, Syncer, sha256  # noqa: E402
 
@@ -233,6 +234,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._action('school', self.open_school)
         self._action('newfolder', self.new_folder, '<Control><Shift>n')
         self._action('quick', self.open_quick, '<Control>k')
+        self._action('draw', self.insert_drawing, '<Control><Shift>d')
         self._action('back', lambda: self.step_hist(-1), '<Alt>Left')
         self._action('forward', lambda: self.step_hist(1), '<Alt>Right')
 
@@ -385,7 +387,7 @@ class MainWindow(Adw.ApplicationWindow):
         bar.add_css_class('fmt')
         for text, act, tip in (('H1', 'h1', 'Überschrift 1 (Strg+1)'), ('H2', 'h2', 'Überschrift 2 (Strg+2)'), ('H3', 'h3', 'Überschrift 3 (Strg+3)'), ('|', None, None),
                                ('B', 'bold', 'Fett (Strg+B)'), ('I', 'italic', 'Kursiv (Strg+I)'), ('</>', 'code', 'Code (Strg+E)'), ('|', None, None),
-                               ('Liste', 'ul', 'Aufzählung'), ('Aufgabe', 'task', 'Aufgabe')):
+                               ('Liste', 'ul', 'Aufzählung'), ('Aufgabe', 'task', 'Aufgabe'), ('|', None, None), ('✎ Zeichnen', 'draw', 'Zeichnung einfügen (Strg+Umschalt+D)')):
             if act is None:
                 bar.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL, margin_start=6, margin_end=6, margin_top=6, margin_bottom=6))
                 continue
@@ -407,6 +409,7 @@ class MainWindow(Adw.ApplicationWindow):
         t('quote', foreground='#888888')
         t('done', strikethrough=True, foreground='#888888')
         t('marker', foreground='#5b86ea', weight=600)
+        t('inkline', foreground_rgba=Gdk.RGBA(0, 0, 0, 0))  # Zeile der Zeichnung: Text unsichtbar, die Vorschau liegt darüber
         t('hidden', invisible=True)  # Formatierungszeichen (#, **, *, `) außerhalb der Cursor-Zeile
         self.text = Gtk.TextView(buffer=self.buffer, wrap_mode=Gtk.WrapMode.WORD_CHAR, left_margin=28, right_margin=28, top_margin=22, bottom_margin=60, pixels_below_lines=4)
         self.text.add_css_class('note-text')
@@ -419,6 +422,9 @@ class MainWindow(Adw.ApplicationWindow):
         tap.connect('pressed', self._on_text_tap)
         self.text.add_controller(tap)
         self._hl_line = -1
+        self._ink_widgets = []
+        self._ink_pending = False
+        self.ink_win = None
         sc = Gtk.ScrolledWindow(vexpand=True)
         sc.set_child(Adw.Clamp(maximum_size=860, child=self.text))
         box.append(sc)
@@ -1012,8 +1018,13 @@ class MainWindow(Adw.ApplicationWindow):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_start=18, margin_end=18, margin_top=18, margin_bottom=18)
         entry = Gtk.Entry(placeholder_text='Idee festhalten …')
         entry.set_size_request(-1, 48)
-        box.append(entry)
-        box.append(label('Landet in der Inbox. ↵ festhalten, Esc schließen.', ['caption', 'dim-label']))
+        row = Gtk.Box(spacing=8)
+        entry.set_hexpand(True)
+        row.append(entry)
+        hint = label('Landet in der Inbox. ↵ festhalten, Esc schließen.', ['caption', 'dim-label'], wrap=True)
+        row.append(ideas_ui.mic_button(entry, hint.set_text, cfgmod.load().stt_command))
+        box.append(row)
+        box.append(hint)
 
         def submit(*_):
             if inbox.add_idea(self.root, entry.get_text()):
@@ -1262,6 +1273,79 @@ class MainWindow(Adw.ApplicationWindow):
                         at(pos + m.start(), pos + m.start() + 1, 'hidden')
                         at(pos + m.end() - 1, pos + m.end(), 'hidden')
             pos = end + 1
+        self._queue_ink()
+
+
+    # ---------- Zeichnungen (.ink, wie in der Android-App) ----------
+
+    def _note_dir(self) -> Path:
+        return (self.root / self.current).parent
+
+    def insert_drawing(self):
+        """Fügt an der Cursor-Zeile einen Zeichenblock ein und öffnet den Editor."""
+        if not self.current:
+            return
+        b = self.buffer
+        it = b.get_iter_at_mark(b.get_insert())
+        ink_id = ink.new_id()
+        b.begin_user_action()
+        if not it.starts_line():
+            b.insert(it, '\n')
+            it = b.get_iter_at_mark(b.get_insert())
+        b.insert(it, ink.block_line(ink_id) + '\n')
+        b.end_user_action()
+        self.flush_save()
+        self.open_drawing(ink_id)
+
+    def open_drawing(self, ink_id: str):
+        if not self.current:
+            return
+        win = ink_ui.InkWindow(self, self._note_dir(), ink_id, self._drawing_saved)
+        win.present()
+        self.ink_win = win
+
+    def _drawing_saved(self, ink_id: str):
+        self._queue_ink(force=True)
+        self.request_sync()
+
+    def _queue_ink(self, force=False):
+        if force:
+            self._ink_sig = None
+        if not self._ink_pending:
+            self._ink_pending = True
+            GLib.idle_add(self._sync_ink)
+
+    def _sync_ink(self):
+        """Legt unter jede Zeichenzeile die Vorschau (Überlagerung) und gibt der Zeile die passende Höhe."""
+        self._ink_pending = False
+        for w in self._ink_widgets:
+            if w.get_parent() is self.text:
+                self.text.remove(w)
+        self._ink_widgets = []
+        if not self.current:
+            return GLib.SOURCE_REMOVE
+        b = self.buffer
+        width = max(240, min(self.text.get_width() - 56, 640))
+        for ln in range(b.get_line_count()):
+            start = b.get_iter_at_line(ln)[1]
+            end = start.copy()
+            if not end.ends_line():
+                end.forward_to_line_end()
+            m = ink.BLOCK.match(b.get_text(start, end, True))
+            if not m:
+                continue
+            ink_id = m.group(1)
+            height = ink_ui.InkPreview.height_for(self._note_dir(), ink_id, width)
+            tag = f'inkh{height}'
+            if not b.get_tag_table().lookup(tag):
+                b.create_tag(tag, pixels_below_lines=height + 12)
+            b.apply_tag_by_name('inkline', start, end)
+            b.apply_tag_by_name(tag, start, end)
+            y = self.text.get_iter_location(start).y
+            prev = ink_ui.InkPreview(self._note_dir(), ink_id, width, self.open_drawing)
+            self.text.add_overlay(prev, 28, y)
+            self._ink_widgets.append(prev)
+        return GLib.SOURCE_REMOVE
 
     # ---------- Formatieren (Markdown bleibt im Text sichtbar) ----------
 

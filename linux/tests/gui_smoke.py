@@ -254,6 +254,50 @@ def s5f():
     check('Übersicht: im Baum ist nichts markiert', w.tree.get_selection().get_selected()[1] is None)
 
 
+@step(18950)
+def s5g():
+    from notizen_linux import ink, ink_ui
+    w = app.win
+    w.open_note('Schule/Mathe/Ableitung.md')
+    w.insert_drawing()
+    ids = [m.group(1) for ln in w._text().split('\n') if (m := ink.BLOCK.match(ln))]
+    check('Zeichenblock steht in der Notiz', len(ids) == 1 and w.ink_win is not None, w._text()[-40:])
+    win = w.ink_win
+    c = win.canvas
+    c.pen_down(100, 100, 0.4)
+    c.pen_move(200, 150, 0.8)
+    c.pen_up()
+    d = w.root / 'Schule/Mathe/.ink'
+    check('Strich liegt als JSON und SVG neben der Notiz', (d / f'{ids[0]}.json').exists() and (d / f'{ids[0]}.svg').exists())
+    win.set_tool('marker')
+    win.set_color('#2f6fed')
+    c.pen_down(100, 300)
+    c.pen_move(400, 300)
+    c.pen_up()
+    check('Marker mit Farbe gespeichert', len(ink.load(d.parent, ids[0]).strokes) == 2 and ink.load(d.parent, ids[0]).strokes[1].tool == 'marker')
+    win.undo()
+    check('Rückgängig nimmt den letzten Strich', len(ink.load(d.parent, ids[0]).strokes) == 1)
+    win.extend()
+    check('Seite lässt sich verlängern', ink.load(d.parent, ids[0]).height == 900)
+    win.close()
+    w._sync_ink()
+    check('Vorschau erscheint in der Notiz', len(w._ink_widgets) == 1 and isinstance(w._ink_widgets[0], ink_ui.InkPreview) and len(w._ink_widgets[0].doc.strokes) == 1)
+    check('Gespeicherte Notiz behält den Block', ids[0] in w._text())
+
+
+@step(18980)
+def s5h():
+    from unittest import mock
+    from notizen_linux import ideas_ui
+    said = []
+    entry = __import__('gi').repository.Gtk.Entry()
+    with mock.patch.dict(os.environ, {'NOTIZEN_STT': ''}), mock.patch('notizen_linux.dictate.stt_argv', return_value=None):
+        btn = ideas_ui.mic_button(entry, said.append)
+        btn.set_active(True)
+    check('Mikrofon ohne Spracherkennung: Hinweis statt Aufnahme', not btn.get_active() and said and 'Spracherkennung' in said[-1], str(said))
+    check('Eingabezeile hat den Mikrofon-Knopf', ideas_ui.capture_card(app.win) is not None)
+
+
 @step(19000)
 def s6():
     from notizen_linux import ideas_ui, inbox

@@ -13,7 +13,7 @@ gi.require_version('Adw', '1')
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from . import config as cfgmod  # noqa: E402
-from . import dash, inbox  # noqa: E402
+from . import dash, dictate, inbox  # noqa: E402
 
 AREAS = ['Schule', 'Projekte', 'Alltag']
 MINUTES = [15, 30, 45, 60, 90]
@@ -65,6 +65,66 @@ def counts(win) -> tuple[int, int]:
 
 # ---- Eingabezeile und Inbox-Karte in Übersicht und Bereichen ----
 
+def mic_button(entry, say, configured=''):
+    """Mikrofon-Knopf: erster Klick nimmt auf, zweiter schreibt die Umschrift ans Ende des Feldes. `say(text)` zeigt Meldungen."""
+    btn = Gtk.ToggleButton(icon_name='audio-input-microphone-symbolic', tooltip_text='Diktieren (Klick startet, nochmal Klick beendet)')
+    state = {'rec': None, 'busy': False}
+
+    def toggled(b):
+        if state['busy']:
+            return
+        if b.get_active():
+            ok, hint = dictate.status(configured)
+            if not ok:
+                b.set_active(False)
+                say(hint)
+                return
+            try:
+                state['rec'] = dictate.Recording()
+            except (RuntimeError, OSError) as e:
+                b.set_active(False)
+                say(str(e))
+                return
+            b.add_css_class('destructive-action')
+            say('Aufnahme läuft … nochmal aufs Mikrofon klicken zum Beenden.')
+            return
+        b.remove_css_class('destructive-action')
+        rec, state['rec'] = state['rec'], None
+        if rec is None:
+            return
+        wav = rec.stop()
+        state['busy'] = True
+        b.set_sensitive(False)
+        say('Schreibe mit …')
+
+        def work():
+            try:
+                text, err = dictate.transcribe(wav, configured), None
+            except RuntimeError as e:
+                text, err = '', str(e)
+
+            def done():
+                state['busy'] = False
+                b.set_sensitive(True)
+                if err:
+                    say(err)
+                elif text:
+                    cur = entry.get_text().rstrip()
+                    entry.set_text((cur + ' ' if cur else '') + text)
+                    entry.set_position(-1)
+                    say('Diktiert – prüfen und mit Enter festhalten.')
+                else:
+                    say('Nichts verstanden.')
+                return GLib.SOURCE_REMOVE
+
+            GLib.idle_add(done)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    btn.connect('toggled', toggled)
+    return btn
+
+
 def capture_card(win):
     card = _card()
     row = Gtk.Box(spacing=8)
@@ -82,6 +142,7 @@ def capture_card(win):
     entry.connect('activate', submit)
     btn.connect('clicked', submit)
     row.append(entry)
+    row.append(mic_button(entry, win.toast, cfgmod.load().stt_command))
     row.append(btn)
     card.inner.append(row)
     card.inner.append(_label('Landet in der Inbox, sortiert wird bei der Durchsicht. Strg+Alt+I öffnet das Fenster überall in der App.', ['caption', 'dim-label'], wrap=True))
@@ -354,7 +415,11 @@ class CaptureApp(Adw.Application):
         entry = Gtk.Entry(placeholder_text='Idee festhalten …')
         entry.set_size_request(-1, 48)
         msg = _label('Landet in der Inbox. ↵ festhalten, Esc schließen.', ['caption', 'dim-label'])
-        box.append(entry)
+        row = Gtk.Box(spacing=8)
+        entry.set_hexpand(True)
+        row.append(entry)
+        row.append(mic_button(entry, msg.set_text, cfg.stt_command))
+        box.append(row)
         box.append(msg)
         tv.set_content(box)
         win.set_content(tv)
