@@ -13,6 +13,11 @@ def dir_of(p: str) -> str:
     return p.rsplit('/', 1)[0] if '/' in p else ''
 
 
+def ctx_folder(path: str, is_folder: bool) -> str:
+    """Ordner, in dem ein Rechtsklick auf `path` neu anlegt: der Ordner selbst, bei einer Notiz ihr Ordner ('' = Wurzel)."""
+    return path if is_folder else dir_of(path)
+
+
 def _key(s: str) -> str:
     return s.casefold()
 

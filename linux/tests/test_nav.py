@@ -40,6 +40,11 @@ class NavTest(unittest.TestCase):
         self.assertIsNone(nav.pager(PATHS, 'Schule/Physik/Elektrisches Feld.md')['prev'])
         self.assertEqual(nav.pager(PATHS, 'Eigene Notiz.md')['folder'], '')
 
+    def test_rechtsklick_ziel(self):
+        self.assertEqual(nav.ctx_folder('Schule/Physik', True), 'Schule/Physik')
+        self.assertEqual(nav.ctx_folder('Schule/Physik/Magnetismus.md', False), 'Schule/Physik')
+        self.assertEqual(nav.ctx_folder('Eigene Notiz.md', False), '')
+
     def test_pfadkette(self):
         self.assertEqual(nav.crumbs('Schule/Physik/Magnetismus.md'), [{'label': 'Schule', 'path': 'Schule'}, {'label': 'Physik', 'path': 'Schule/Physik'}])
         self.assertEqual(nav.crumbs('Eigene Notiz.md'), [])

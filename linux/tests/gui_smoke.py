@@ -20,7 +20,7 @@ from notizen_linux import config  # noqa: E402
 SERVER, TOKEN = os.environ['NOTIZEN_SERVER'], os.environ['NOTIZEN_TOKEN']
 config.save(config.Config(SERVER, TOKEN, str(tmp / 'notizen')))
 
-from gi.repository import GLib  # noqa: E402
+from gi.repository import GLib, Gtk  # noqa: E402
 
 from notizen_linux.app import App  # noqa: E402
 from notizen_linux.sync import Client  # noqa: E402
@@ -186,6 +186,25 @@ def s5c():
     w.school.disconnect()
     w.update_lesson()
     check('Ohne Verbindung keine Karte', not w.lesson_btn.get_visible())
+
+
+@step(18600)
+def s5d():
+    w = app.win
+    pop = w.tree_menu('Schule/Physik', 40, 40)
+    labels = []
+    child = pop.get_child().get_first_child()
+    while child:
+        if isinstance(child, Gtk.Button):
+            labels.append(child.get_label())
+        child = child.get_next_sibling()
+    check('Rechtsklick-Menü bietet Neue Notiz und Neuer Ordner', labels == ['Neue Notiz hier …', 'Neuer Ordner hier …'], str(labels))
+    pop.popdown()
+    # Zeile unter der Maus: die erste Zeile des Baums liegt oben links
+    p = w._path_at(30, 12)
+    it = w.store.get_iter(p) if p is not None else None
+    check('Baumzeile unter der Maus wird gefunden', it is not None and w.store.get_value(it, 1) in ('Alltag', 'Projekte', 'Schule'), str(p))
+    check('Zwischen den Zeilen (weit unten) trifft der Klick keine Zeile', w._path_at(30, 5000) is None)
 
 
 @step(19000)

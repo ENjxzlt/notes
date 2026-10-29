@@ -333,6 +333,9 @@ class MainWindow(Adw.ApplicationWindow):
         self.tree.get_selection().connect('changed', self._on_tree_selection)
         self.tree.connect('row-expanded', lambda _t, it, path: self._remember(it, True))
         self.tree.connect('row-collapsed', lambda _t, it, path: self._remember(it, False))
+        rclick = Gtk.GestureClick(button=3)  # Rechtsklick: Neue Notiz / Neuer Ordner im angeklickten Ordner
+        rclick.connect('pressed', self._on_tree_rclick)
+        self.tree.add_controller(rclick)
         sc = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         sc.set_child(self.tree)
         box.append(sc)
@@ -487,6 +490,45 @@ class MainWindow(Adw.ApplicationWindow):
                 self.tree.expand_row(store.get_path(it), False)
         self._tree_lock = False
         self._render_side()
+
+    def _path_at(self, x: float, y: float):
+        """Pfad der Baumzeile unter der Maus (None, wenn dort keine Zeile ist)."""
+        bx, by = self.tree.convert_widget_to_bin_window_coords(int(x), int(y))
+        hit = self.tree.get_path_at_pos(bx, by)
+        if isinstance(hit, tuple):
+            hit = next((h for h in hit if isinstance(h, Gtk.TreePath)), None)
+        return hit
+
+    def _on_tree_rclick(self, _g, _n, x, y):
+        folder = ''
+        path = self._path_at(x, y) if self.store else None
+        if path is not None:
+            it = self.store.get_iter(path)
+            folder = nav.ctx_folder(self.store.get_value(it, 1), self.store.get_value(it, 2))
+        self.tree_menu(folder, x, y)
+
+    def tree_menu(self, folder: str, x: float, y: float):
+        """Kleines Menü an der Maus: Neue Notiz hier, Neuer Ordner hier."""
+        pop = Gtk.Popover(has_arrow=False)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, margin_top=4, margin_bottom=4, margin_start=4, margin_end=4)
+        box.append(label(f'In „{folder.split("/")[-1]}“' if folder else 'Im Notizen-Ordner', ['caption', 'dim-label']))
+        box.get_first_child().set_margin_start(10)
+        box.get_first_child().set_margin_bottom(4)
+        for text, fn in (('Neue Notiz hier …', lambda: self.new_note(folder)), ('Neuer Ordner hier …', lambda: self.new_folder(folder))):
+            b = Gtk.Button(label=text, halign=Gtk.Align.FILL)
+            b.add_css_class('flat')
+            b.get_child().set_halign(Gtk.Align.START)
+            b.connect('clicked', lambda _b, f=fn: (pop.popdown(), f()))
+            box.append(b)
+        pop.set_child(box)
+        pop.set_parent(self.tree)
+        rect = Gdk.Rectangle()
+        rect.x, rect.y, rect.width, rect.height = int(x), int(y), 1, 1
+        pop.set_pointing_to(rect)
+        pop.connect('closed', lambda p: GLib.idle_add(lambda: (p.unparent(), GLib.SOURCE_REMOVE)[1]))
+        self._tree_pop = pop
+        pop.popup()
+        return pop
 
     def _remember(self, it, opened):
         if getattr(self, '_tree_lock', False):
@@ -1130,10 +1172,16 @@ class MainWindow(Adw.ApplicationWindow):
 
         dlg.choose(self, None, done)
 
-    def new_note(self):
+    def _here(self) -> str:
+        """Ordner, in dem man gerade ist (offene Notiz oder Bereich); '' in der Übersicht und auf den Sonderseiten."""
+        return nav.dir_of(self.current) if self.current else ('' if self.area.startswith('!') else self.area)
+
+    def new_note(self, folder: str | None = None):
+        """Neue Notiz; `folder` kommt vom Rechtsklick, sonst gilt der aktuelle Ordner."""
+        here = self._here() if folder is None else folder
         entry = Gtk.Entry(placeholder_text='Schule/Physik/Titel', activates_default=True)
-        if self.area:
-            entry.set_text(self.area + '/')
+        if here:
+            entry.set_text(here + '/')
             entry.set_position(-1)
 
         def create():
@@ -1144,9 +1192,9 @@ class MainWindow(Adw.ApplicationWindow):
 
         self._ask('Neue Notiz', 'Ordner und Titel, getrennt mit /. Fehlende Ordner werden angelegt.', 'Anlegen', create, entry)
 
-    def new_folder(self):
+    def new_folder(self, folder: str | None = None):
         """Neuer Ordner (auch verschachtelt, z. B. „Schule/Physik/Optik“); Standard ist der Ordner, in dem man gerade ist."""
-        here = nav.dir_of(self.current) if self.current else ('' if self.area.startswith('!') else self.area)
+        here = self._here() if folder is None else folder
         entry = Gtk.Entry(placeholder_text='Schule/Physik/Optik', activates_default=True, text=f'{here}/' if here else '')
         entry.set_position(-1)
 
