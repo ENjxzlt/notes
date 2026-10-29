@@ -12,6 +12,7 @@ import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { HttpError } from './vault.js';
+import { parseDue, parseTasks, taskLine } from '../public/inbox.js';
 
 const MAX_TEXT = 1_000_000; // 1 MB Text je Notiz über MCP
 
@@ -139,6 +140,57 @@ export function buildMcpServer(vault, dataDir) {
     const { info } = vault.put(p, Buffer.from(existing + sep + text + (text.endsWith('\n') ? '' : '\n'), 'utf8'), base);
     audit('append_note', p, `rev=${info.rev}`);
     return ok(`Angehängt (Revision ${info.rev}).`);
+  }));
+
+  server.registerTool('add_task', {
+    title: 'Aufgabe anlegen',
+    description:
+      'Legt eine Aufgabe als "- [ ]"-Zeile mit geschätzter Dauer und optionaler Frist an; sie erscheint in der Aufgaben-Übersicht aller Apps. ' +
+      'Nutze das, wenn du in einer Notiz oder im Gespräch eine Aufgabe erkennst (z. B. eine Hausaufgabe). Schätze die Dauer realistisch in Minuten ' +
+      '(ähnliche frühere Aufgaben helfen, siehe list_tasks). Eine Frist nur eintragen, wenn sie genannt wurde. Landet standardmäßig in "<Bereich>/Aufgaben.md".',
+    inputSchema: {
+      title: z.string().min(2).max(200).describe('Kurzer Titel der Aufgabe, z. B. "Übungsblatt 5 abgeben"'),
+      area: z.enum(['Schule', 'Projekte', 'Alltag']).describe('Bereich'),
+      minutes: z.number().int().min(5).max(600).describe('Geschätzte Dauer in Minuten'),
+      due: z.string().optional().describe('Frist wie "Freitag", "morgen" oder "3.11." (nur wenn genannt)'),
+      note: z.string().optional().describe('Pfad einer Notiz, in die die Aufgabe soll (Standard: "<Bereich>/Aufgaben.md")'),
+    },
+  }, guarded(({ title, area, minutes, due, note }) => {
+    let frist = null;
+    if (due && due.trim()) {
+      frist = parseDue(due);
+      if (!frist) return fail('Frist nicht verstanden. Erlaubt sind Wochentage, "heute", "morgen" oder ein Datum wie "3.11.".');
+    }
+    const p = mdPath(note || `${area}/Aufgaben.md`);
+    const line = taskLine(title, minutes, frist);
+    const cur = vault.info(p);
+    let existing = '';
+    if (cur && !cur.deleted) existing = vault.read(p).data.toString('utf8');
+    const sep = existing && !existing.endsWith('\n') ? '\n' : '';
+    const head = existing ? '' : `# ${path.basename(p, '.md')}\n\n`;
+    const { info } = vault.put(p, Buffer.from(`${head}${existing}${sep}${line}\n`, 'utf8'), cur ? cur.rev : 0);
+    audit('add_task', p, `rev=${info.rev}`);
+    return ok(`Aufgabe angelegt in ${p} (Revision ${info.rev}): ${line}`);
+  }));
+
+  server.registerTool('list_tasks', {
+    title: 'Offene Aufgaben',
+    description: 'Listet alle offenen Aufgaben ("- [ ]") mit Notiz, Dauer und Frist; optional nur unter einem Ordner. Hilft, Dauer zu schätzen und Doppelte zu vermeiden.',
+    inputSchema: { folder: z.string().optional().describe('Nur unter diesem Ordner, z. B. "Schule"') },
+  }, guarded(({ folder }) => {
+    const out = [];
+    for (const f of vault.list(folder || '').filter((x) => x.path.endsWith('.md'))) {
+      let text;
+      try {
+        text = vault.read(f.path).data.toString('utf8');
+      } catch {
+        continue;
+      }
+      for (const t of parseTasks(text)) {
+        out.push(`${f.path}: ${t.title}${t.minutes != null ? ` (~${t.minutes} min${t.due ? `, bis ${t.due}` : ''})` : ''}`);
+      }
+    }
+    return ok(out.length ? out.slice(0, 200).join('\n') : 'Keine offenen Aufgaben.');
   }));
 
   server.registerTool('list_versions', {

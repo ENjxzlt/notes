@@ -42,6 +42,9 @@ Ohne `MCP_TOKEN` gibt es den Zugang nicht. Das Token ist **ein eigenes Geheimnis
 den Zugang nehmen (Token löschen, Container neu starten), ohne die Geräte neu zu verbinden.
 
 Werkzeuge: `list_notes`, `read_note`, `search_notes`, `write_note`, `append_note`, `list_versions`, `restore_version`.
+Dazu `add_task` (Aufgabe als `- [ ] Titel (~45 min · bis 30.10.)` mit geschätzter Dauer und optionaler Frist, Standard „<Bereich>/Aufgaben.md“) und `list_tasks`
+(offene Aufgaben, hilft beim Schätzen). So legt Claude erkannte Aufgaben (z. B. Hausaufgaben) direkt richtig an; sie erscheinen in der Aufgaben-Übersicht aller Apps.
+Das Eintragen in Slotwise ist damit noch nicht verbunden: Slotwise nimmt Aufgaben bisher nur mit Login-Cookie an, es braucht dort erst einen API-Token.
 Bewusst **kein Löschen** und nur Markdown-Notizen (keine Zeichnungen).
 
 Schutz vor Fehlern:
