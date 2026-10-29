@@ -643,8 +643,28 @@ private class NoteEdit(ctx: Context) : EditText(ctx) {
     var onOverlayEdited: (() -> Unit)? = null
     var inkModel: InkModel? = null
     var inkActiveId: String? = null
+        set(v) {
+            field = v
+            updateHandwriting()
+        }
     var overlayModel: InkModel? = null
     var drawMode = true
+        set(v) {
+            field = v
+            updateHandwriting()
+        }
+
+    init {
+        updateHandwriting()
+    }
+
+    /**
+     * Android 14 macht aus Stiftstrichen auf Textfeldern automatisch "Handschrift zu Text" (und Samsung legt das S-Pen-Feld darüber).
+     * Solange der Stift zeichnen darf oder ein Zeichenblock aktiv ist, muss das aus sein, sonst entsteht Text statt einer Zeichnung.
+     */
+    private fun updateHandwriting() {
+        if (android.os.Build.VERSION.SDK_INT >= 34) isAutoHandwritingEnabled = !(drawMode || inkActiveId != null)
+    }
 
     private var pendingBox: MdCheckbox? = null
     private var tapCandidate = false
