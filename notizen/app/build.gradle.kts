@@ -35,3 +35,8 @@ android {
         jvmTarget = "17"
     }
 }
+
+dependencies {
+    // Nur für die Unit-Tests der reinen Logik (Nav, Inbox); die App selbst bleibt ohne Bibliotheken
+    testImplementation("junit:junit:4.13.2")
+}
