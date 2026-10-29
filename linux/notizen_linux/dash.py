@@ -59,9 +59,23 @@ def tasks_of(root: Path, notes: list[Note]) -> list[tuple[Note, str]]:
     return out
 
 
-def folders(notes: list[Note], area: str) -> list[tuple[str, list[Note]]]:
-    """Unterordner von `area` (Wurzel: Schule, Projekte, Alltag zuerst), mit ihren Notizen."""
+def dirs(root: Path) -> list[str]:
+    """Alle Ordner im Notizen-Ordner (relativ, ohne versteckte), auch leere."""
+    out = []
+    for p in Path(root).rglob('*'):
+        if p.is_dir():
+            rel = p.relative_to(root).as_posix()
+            if not any(seg.startswith('.') for seg in rel.split('/')):
+                out.append(rel)
+    return out
+
+
+def folders(notes: list[Note], area: str, empty: list[str] | tuple = ()) -> list[tuple[str, list[Note]]]:
+    """Unterordner von `area` (Wurzel: Schule, Projekte, Alltag zuerst), mit ihren Notizen; `empty` sind alle Ordner, auch leere."""
     groups: dict[str, list[Note]] = {a: [] for a in TOP_AREAS} if not area else {}
+    for d in empty:
+        if not area or d.startswith(area + '/'):
+            groups.setdefault((d[len(area) + 1:] if area else d).split('/', 1)[0], [])
     for n in notes:
         rest = n.path[len(area) + 1:] if area else n.path
         if '/' not in rest:

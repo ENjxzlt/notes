@@ -34,7 +34,7 @@ def _card(spacing=8):
     b.add_css_class('card')
     for side in ('start', 'end', 'top', 'bottom'):
         getattr(b, f'set_margin_{side}')(2)
-    inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=spacing, margin_start=18, margin_end=18, margin_top=16, margin_bottom=16)
+    inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=spacing + 4, margin_start=26, margin_end=26, margin_top=22, margin_bottom=22)
     b.append(inner)
     b.inner = inner  # type: ignore[attr-defined]
     return b
@@ -118,7 +118,7 @@ def build(win, box, area: str) -> None:
 
 
 def _header(area: str):
-    head = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    head = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_bottom=6)
     eyebrow = {'!ideen': 'WOCHENDURCHSICHT · INBOX', '!aufgaben': 'ALLE NOTIZEN', '!rueckblick': ''}[area]
     if eyebrow:
         head.append(_label(eyebrow, ['eyebrow']))

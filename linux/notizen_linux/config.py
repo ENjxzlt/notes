@@ -42,6 +42,7 @@ def save(cfg: Config) -> None:
 
 
 NAV_FILE = DATA_DIR / 'nav.json'
+SCHOOL_FILE = CONFIG_DIR / 'school.json'  # Abo-Token von Slotwise: wie die Verbindungsdaten nur für den Benutzer lesbar
 
 
 def load_nav() -> dict:

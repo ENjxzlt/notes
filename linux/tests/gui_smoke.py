@@ -139,6 +139,55 @@ def s5():
     check('Neue Notiz aus dem Schnellwechsel', w.current == 'Schule/Physik/Schnell.md' and (w.root / 'Schule/Physik/Schnell.md').read_text() == '# Schnell\n\n')
 
 
+@step(17500)
+def s5b():
+    w = app.win
+    w.open_note('Schule/Physik/Schnell.md')
+    w.buffer.set_text('# Wecker nach Schlafphase\n\nText mit **fett**, *kursiv* und `code`.\n')
+    w.buffer.place_cursor(w.buffer.get_end_iter())
+    w._highlight()
+    hidden = w.buffer.get_tag_table().lookup('hidden')
+    at = lambda off: w.buffer.get_iter_at_offset(off).has_tag(hidden)  # noqa: E731
+    text = w._text()
+    check('Formatierungszeichen sind außerhalb der Cursor-Zeile versteckt', at(0) and at(1) and not at(2), f'# vorn: {at(0)} {at(1)} {at(2)}')
+    b = text.index('**fett**')
+    check('Fett-Sternchen versteckt, Wort sichtbar', at(b) and at(b + 1) and not at(b + 2) and at(b + 6) and at(b + 7))
+    check('Code-Backticks versteckt', at(text.index('`code`')) and not at(text.index('`code`') + 1))
+    w.buffer.place_cursor(w.buffer.get_iter_at_offset(3))  # Cursor in die Überschrift
+    check('In der Cursor-Zeile sind die Zeichen sichtbar', not at(0) and not at(1))
+    w.buffer.place_cursor(w.buffer.get_end_iter())
+    check('Cursor weg: wieder versteckt', at(0))
+    w.flush_save()
+    saved = (w.root / 'Schule/Physik/Schnell.md').read_text(encoding='utf-8')
+    check('Gespeicherte Datei behält alle Formatierungszeichen', saved == '# Wecker nach Schlafphase\n\nText mit **fett**, *kursiv* und `code`.\n', repr(saved))
+
+
+@step(18200)
+def s5c():
+    import time
+    from datetime import datetime
+    from notizen_linux import dash
+    w = app.win
+    (w.root / 'Schule' / 'Optik' / 'Leer').mkdir(parents=True)
+    w.refresh_tree()
+    paths = []
+    w.store.foreach(lambda m, p, it: (paths.append(m.get_value(it, 1)), False)[1])
+    check('Leere Ordner erscheinen im Baum', 'Schule/Optik' in paths and 'Schule/Optik/Leer' in paths)
+    check('Leere Ordner erscheinen als Karten', 'Schule/Optik' in [f for f, _ in dash.folders([], 'Schule', dash.dirs(w.root))])
+    now = time.time()
+    iso = lambda t: datetime.fromtimestamp(t).astimezone().isoformat()  # noqa: E731
+    w.school.connect('http://127.0.0.1:1/ical/tok.ics')
+    w.school.data['cache'] = {'lessons': [{'start': iso(now - 600), 'end': iso(now + 2100), 'period': 3, 'subject': 'Ph', 'teacher': 'Be', 'room': '12', 'changed': False, 'cancelled': False}]}
+    w.update_lesson()
+    check('Stundenkarte zeigt die laufende Stunde', w.lesson_btn.get_visible() and w.lesson_title.get_text() == 'Ph' and w.lesson_head.get_text().startswith('JETZT'), w.lesson_head.get_text())
+    w.school.set_folder('Ph', 'Schule/Physik')
+    w.on_lesson(False)
+    check('Tippen auf die Karte öffnet den Fach-Ordner', w.title.get_title() == 'Physik')
+    w.school.disconnect()
+    w.update_lesson()
+    check('Ohne Verbindung keine Karte', not w.lesson_btn.get_visible())
+
+
 @step(19000)
 def s6():
     from notizen_linux import ideas_ui, inbox

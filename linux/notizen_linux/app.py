@@ -17,7 +17,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from . import config as cfgmod  # noqa: E402
 from . import dash  # noqa: E402
-from . import ideas_ui, nav  # noqa: E402
+from . import ideas_ui, nav, schoolplan  # noqa: E402
 from . import inbox  # noqa: E402
 from .sync import AuthError, Client, ServerError, Syncer, sha256  # noqa: E402
 
@@ -30,7 +30,7 @@ CSS = """
 window, textview { font-family: "IBM Plex Sans", "Cantarell", sans-serif; }
 .mono, .eyebrow, .when { font-family: "IBM Plex Mono", monospace; }
 .eyebrow { font-size: 11px; letter-spacing: 1px; opacity: .7; }
-.area-card { padding: 16px 20px; border-radius: 12px; background: @card_bg_color; border: 1px solid alpha(@window_fg_color, .12); box-shadow: none; }
+.area-card { padding: 22px 26px; border-radius: 12px; background: @card_bg_color; border: 1px solid alpha(@window_fg_color, .12); box-shadow: none; }
 .area-card:hover { border-color: @accent_bg_color; }
 .when { font-size: 12px; opacity: .7; }
 .lv0, .lv1, .lv2, .lv3, .lv4 { min-width: 13px; min-height: 13px; border-radius: 3px; }
@@ -40,8 +40,13 @@ window, textview { font-family: "IBM Plex Sans", "Cantarell", sans-serif; }
 .lv3 { background: mix(@card_bg_color, @accent_bg_color, .80); }
 .lv4 { background: @accent_bg_color; }
 .fmt button { min-width: 36px; min-height: 32px; }
+.lesson-card { padding: 12px 16px; border-radius: 10px; background: alpha(@accent_bg_color, .12); border: 1px solid alpha(@accent_bg_color, .35); box-shadow: none; }
 .kbd { font-family: "IBM Plex Mono", monospace; font-size: 11px; padding: 1px 6px; border-radius: 4px; border: 1px solid alpha(@window_fg_color, .25); opacity: .8; }
-.sec-label { font-size: 11px; letter-spacing: 1px; opacity: .65; margin: 10px 14px 2px; }
+.sec-label { font-size: 11px; letter-spacing: 1px; opacity: .65; margin: 18px 18px 6px; }
+.side-tree { background: transparent; padding: 0 6px; }
+.side-tree:selected, .side-tree row:selected { border-radius: 8px; }
+.side-foot { padding: 10px 18px; border-top: 1px solid alpha(@window_fg_color, .10); font-size: 12px; }
+.dash-head { margin-bottom: 4px; }
 .side-row { padding: 4px 8px; min-height: 32px; }
 .qs-row { padding: 8px 12px; }
 .qs-hit { font-weight: 700; color: @accent_color; }
@@ -189,12 +194,18 @@ class MainWindow(Adw.ApplicationWindow):
         self.hist: list[tuple[str, str]] = []  # Zurück/Vor: ('n', Notiz) oder ('a', Bereich)
         self.hi, self._nav_lock, self._pin_lock = -1, False, False
         self._text_cache: dict[str, tuple[float, str]] = {}
+        self.school = schoolplan.School(cfgmod.SCHOOL_FILE)  # Stundenplan aus Slotwise
+        self._lesson = None
+        self._lp = False
         self.istate = {'idx': 0, 'area': 'Schule', 'min': 45, 'due': '', 'filter': ''}  # Zustand der Inbox-Durchsicht und Aufgaben
         self._build()
         self.worker = Worker(self.syncer, self.on_report, self.on_status)
         self.worker.start()
         self.refresh_tree()
         self.show_area('')
+        self.update_lesson()
+        self.refresh_school()
+        GLib.timeout_add_seconds(60, self._school_tick)
         self.connect('close-request', self._on_close)
 
     # ---------- Aufbau ----------
@@ -218,6 +229,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._action('settings', self.open_settings)
         self._action('delete', self.delete_note)
         self._action('capture', self.open_capture, '<Control><Alt>i')
+        self._action('school', self.open_school)
+        self._action('newfolder', self.new_folder, '<Control><Shift>n')
         self._action('quick', self.open_quick, '<Control>k')
         self._action('back', lambda: self.step_hist(-1), '<Alt>Left')
         self._action('forward', lambda: self.step_hist(1), '<Alt>Right')
@@ -232,10 +245,13 @@ class MainWindow(Adw.ApplicationWindow):
     def _sidebar(self):
         tv = Adw.ToolbarView()
         hb = Adw.HeaderBar()
-        hb.set_title_widget(Adw.WindowTitle(title='Notizen', subtitle=''))
+        hb.set_title_widget(Adw.WindowTitle(title='', subtitle=''))
         add = Gtk.Button(icon_name='list-add-symbolic', tooltip_text='Neue Notiz (Strg+N)')
         add.set_action_name('win.new')
         hb.pack_start(add)
+        new_dir = Gtk.Button(icon_name='folder-new-symbolic', tooltip_text='Neuer Ordner (Strg+Umschalt+N)')
+        new_dir.set_action_name('win.newfolder')
+        hb.pack_start(new_dir)
         self.back_btn = Gtk.Button(icon_name='go-previous-symbolic', tooltip_text='Zurück (Alt+←)', sensitive=False)
         self.back_btn.set_action_name('win.back')
         self.fwd_btn = Gtk.Button(icon_name='go-next-symbolic', tooltip_text='Vor (Alt+→)', sensitive=False)
@@ -243,7 +259,9 @@ class MainWindow(Adw.ApplicationWindow):
         hb.pack_start(self.back_btn)
         hb.pack_start(self.fwd_btn)
         menu = Gio.Menu()
+        menu.append('Neuer Ordner …', 'win.newfolder')
         menu.append('Jetzt abgleichen', 'win.sync')
+        menu.append('Stundenplan von Slotwise verbinden …', 'win.school')
         menu.append('Verbindung …', 'win.settings')
         menu.append('Beenden', 'app.quit')
         hb.pack_end(Gtk.MenuButton(icon_name='open-menu-symbolic', menu_model=menu))
@@ -279,6 +297,19 @@ class MainWindow(Adw.ApplicationWindow):
         qs.set_action_name('win.quick')
         box.append(qs)
 
+        self.lesson_btn = Gtk.Button(margin_start=12, margin_end=12, margin_top=4, margin_bottom=4, visible=False)
+        self.lesson_btn.add_css_class('lesson-card')
+        li = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3, halign=Gtk.Align.START)
+        self.lesson_head, self.lesson_title, self.lesson_sub = label('', ['eyebrow']), label('', ['title-4']), label('', ['caption', 'dim-label'])
+        for w in (self.lesson_head, self.lesson_title, self.lesson_sub):
+            li.append(w)
+        self.lesson_btn.set_child(li)
+        self.lesson_btn.connect('clicked', lambda *_: self._lesson_click())
+        press = Gtk.GestureLongPress()
+        press.connect('pressed', lambda *_: (setattr(self, '_lp', True), self.on_lesson(True)))
+        self.lesson_btn.add_controller(press)
+        box.append(self.lesson_btn)
+
         self.pins_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.recents_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         box.append(self.pins_box)
@@ -286,12 +317,16 @@ class MainWindow(Adw.ApplicationWindow):
         box.append(label('ORDNER', ['sec-label']))
 
         self.store = None
-        self.tree = Gtk.TreeView(headers_visible=False, enable_search=False, activate_on_single_click=True)
+        self.tree = Gtk.TreeView(headers_visible=False, enable_search=False, activate_on_single_click=True, level_indentation=10)
+        self.tree.add_css_class('side-tree')
         col = Gtk.TreeViewColumn('Name')
-        name_cell = Gtk.CellRendererText(ellipsize=3)
-        count_cell = Gtk.CellRendererText(xalign=1.0, foreground='#888888', scale=0.85)
+        icon_cell = Gtk.CellRendererPixbuf(xpad=6)
+        name_cell = Gtk.CellRendererText(ellipsize=3, ypad=8, xpad=4)
+        count_cell = Gtk.CellRendererText(xalign=1.0, foreground='#8b8b93', scale=0.85, xpad=10)
+        col.pack_start(icon_cell, False)
         col.pack_start(name_cell, True)
         col.pack_start(count_cell, False)
+        col.add_attribute(icon_cell, 'icon-name', 4)
         col.add_attribute(name_cell, 'text', 0)
         col.add_attribute(count_cell, 'text', 3)
         self.tree.append_column(col)
@@ -303,7 +338,7 @@ class MainWindow(Adw.ApplicationWindow):
         box.append(sc)
 
         self.status = label('', ['mono', 'dim-label'], ellipsize=True)
-        self.status.set_margin_start(12)
+        self.status.set_margin_start(18)
         self.status.set_margin_end(12)
         self.status.set_margin_top(8)
         self.status.set_margin_bottom(8)
@@ -334,7 +369,7 @@ class MainWindow(Adw.ApplicationWindow):
         tv.add_top_bar(hb)
 
         self.stack = Gtk.Stack()
-        self.dash_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=22, margin_top=24, margin_bottom=32, margin_start=24, margin_end=24)
+        self.dash_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=32, margin_top=44, margin_bottom=56, margin_start=44, margin_end=44)
         clamp = Adw.Clamp(maximum_size=1100, child=self.dash_box)
         self.stack.add_named(Gtk.ScrolledWindow(child=clamp, hscrollbar_policy=Gtk.PolicyType.NEVER), 'dash')
         self.stack.add_named(self._note_page(), 'note')
@@ -368,9 +403,12 @@ class MainWindow(Adw.ApplicationWindow):
         t('code', family='monospace', background='#8884')
         t('quote', foreground='#888888')
         t('done', strikethrough=True, foreground='#888888')
+        t('hidden', invisible=True)  # Formatierungszeichen (#, **, *, `) außerhalb der Cursor-Zeile
         self.text = Gtk.TextView(buffer=self.buffer, wrap_mode=Gtk.WrapMode.WORD_CHAR, left_margin=28, right_margin=28, top_margin=22, bottom_margin=60, pixels_below_lines=4)
         self.text.add_css_class('note-text')
         self.buffer.connect('changed', self._on_changed)
+        self.buffer.connect('notify::cursor-position', self._on_cursor)
+        self._hl_line = -1
         sc = Gtk.ScrolledWindow(vexpand=True)
         sc.set_child(Adw.Clamp(maximum_size=860, child=self.text))
         box.append(sc)
@@ -400,7 +438,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.title_stack.set_visible_child_name('title')
         special = area.startswith('!')
         self.title.set_title(ideas_ui.SPECIAL[area] if special else area.split('/')[-1] if area else 'Übersicht')
-        self.title.set_subtitle('' if special else area + '/' if area else datetime.now().strftime('%A, %d. %B').upper())
+        self.title.set_subtitle('' if special or not area else area + '/')
         self._select_nav(area)
         if not special and self._reveal(area + '/x' if area else ''):
             GLib.idle_add(self._idle_tree)  # nicht mitten im Auswahl-Signal des Baums neu aufbauen
@@ -429,18 +467,18 @@ class MainWindow(Adw.ApplicationWindow):
     def refresh_tree(self):
         notes = dash.scan(self.root)
         counts = nav.folder_counts([n.path for n in notes])
-        store = Gtk.TreeStore(str, str, bool, str)
+        store = Gtk.TreeStore(str, str, bool, str, str)
         nodes = {}
-        key = lambda n: [(0 if i < len(p) - 1 else 1, seg.lower()) for p in [n.path.split('/')] for i, seg in enumerate(p)]
-        for n in sorted(notes, key=key):
-            parts = n.path.split('/')
-            parent, acc = None, ''
-            for seg in parts[:-1]:
+        # erst alle Ordner (auch leere), dann die Notizen: Ordner stehen so vor den Notizen ihrer Ebene
+        for d in sorted(dash.dirs(self.root), key=str.lower):
+            acc = ''
+            for seg in d.split('/'):
+                parent = nodes.get(acc)
                 acc = f'{acc}/{seg}' if acc else seg
                 if acc not in nodes:
-                    nodes[acc] = store.append(parent, [seg, acc, True, str(counts[acc])])
-                parent = nodes[acc]
-            store.append(parent, [parts[-1].removesuffix('.md'), n.path, False, dash.when(n.mtime)])
+                    nodes[acc] = store.append(parent, [seg, acc, True, str(counts.get(acc, 0)), 'folder-symbolic'])
+        for n in sorted(notes, key=lambda n: (nav.dir_of(n.path).lower(), nav.title_of(n.path).lower())):
+            store.append(nodes.get(nav.dir_of(n.path)), [nav.title_of(n.path), n.path, False, dash.when(n.mtime), 'text-x-generic-symbolic'])
         self._tree_lock = True
         self.tree.set_model(store)
         self.store = store
@@ -484,7 +522,7 @@ class MainWindow(Adw.ApplicationWindow):
         scoped = [n for n in notes if dash.in_area(n.path, self.area)]
         tasks = dash.tasks_of(self.root, scoped)
 
-        head = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        head = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_bottom=6)
         head.append(label((self.area + '/') if self.area else datetime.now().strftime('%d.%m.%Y'), ['eyebrow']))
         head.append(label(self.area.split('/')[-1] if self.area else 'Übersicht', ['title-1']))
         box.append(head)
@@ -493,10 +531,10 @@ class MainWindow(Adw.ApplicationWindow):
             box.append(card)
         self._update_counts()
 
-        groups = dash.folders(scoped, self.area)
+        groups = dash.folders(scoped, self.area, dash.dirs(self.root))
         if groups:
             box.append(label('Ordner' if self.area else 'Bereiche', ['heading']))
-            flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=14, row_spacing=14, homogeneous=True, min_children_per_line=1, max_children_per_line=4)
+            flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=22, row_spacing=22, homogeneous=True, min_children_per_line=1, max_children_per_line=4)
             for full, ns in groups:
                 b = Gtk.Button()
                 b.add_css_class('area-card')
@@ -522,7 +560,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         box.append(self._graph(scoped))
 
-        row = Gtk.Box(spacing=18, homogeneous=True, valign=Gtk.Align.START)
+        row = Gtk.Box(spacing=26, homogeneous=True, valign=Gtk.Align.START)
         rec = Adw.PreferencesGroup(title='Zuletzt bearbeitet')
         if not scoped:
             rec.set_description('Noch keine Notizen. Mit Strg+N geht es los.')
@@ -585,6 +623,7 @@ class MainWindow(Adw.ApplicationWindow):
             return
         self._loading = True
         self.buffer.set_text(data.decode('utf-8', 'replace'))
+        self.buffer.place_cursor(self.buffer.get_end_iter())  # wie in der Android-App: Cursor ans Ende, die Überschrift bleibt ohne „#“
         self._loading = False
         self.current, self.loaded_hash, self.dirty = rel, sha256(data), False
         self._highlight()
@@ -679,6 +718,115 @@ class MainWindow(Adw.ApplicationWindow):
             cfgmod.save_nav({'pins': self.pins, 'recents': self.recents})
         except OSError:
             pass  # Pins und Verlauf sind Komfort, kein Grund für einen Fehler
+
+    # ---------- Stundenplan (Slotwise) ----------
+
+    def update_lesson(self):
+        """Karte mit laufender oder nächster Stunde; ohne Verbindung oder ohne Stunden heute bleibt sie weg."""
+        nl = self.school.next_card()
+        self._lesson = nl[0] if nl else None
+        self.lesson_btn.set_visible(bool(nl))
+        if nl:
+            c = nl[1]
+            self.lesson_head.set_text(c.head.upper())
+            self.lesson_title.set_text(c.title)
+            self.lesson_sub.set_text(c.sub)
+            self.lesson_sub.set_visible(bool(c.sub))
+
+    def refresh_school(self, manual=False):
+        if not self.school.connected:
+            return
+
+        def work():
+            try:
+                n = self.school.refresh()
+                err = ''
+            except RuntimeError as e:
+                n, err = 0, str(e)
+            GLib.idle_add(done, n, err)
+
+        def done(n, err):
+            self.update_lesson()
+            if manual:
+                self.toast(f'Stundenplan laden fehlgeschlagen: {err}' if err else f'{n} Stunden geladen')
+            return GLib.SOURCE_REMOVE
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _school_tick(self):
+        self._school_ticks = getattr(self, '_school_ticks', 0) + 1
+        self.update_lesson()
+        if self._school_ticks % 30 == 0:  # alle 30 Minuten neu laden
+            self.refresh_school()
+        return GLib.SOURCE_CONTINUE
+
+    def _lesson_click(self):
+        if self._lp:  # nach langem Drücken kommt noch ein Klick: ignorieren
+            self._lp = False
+            return
+        self.on_lesson(False)
+
+    def on_lesson(self, long_press: bool):
+        """Karte angetippt: Fach-Ordner öffnen; beim ersten Mal (oder langem Drücken) Ordner zuordnen."""
+        lsn = self._lesson
+        if not lsn:
+            return
+        folder = self.school.folder_for(self.root, lsn.subject)
+        if long_press or not folder:
+            self.choose_folder(lsn.subject)
+        else:
+            self.show_area(folder)
+
+    def choose_folder(self, subject: str):
+        folders = sorted((p.relative_to(self.root).as_posix() for p in self.root.rglob('*') if p.is_dir() and not any(s.startswith('.') for s in p.relative_to(self.root).parts) and len(p.relative_to(self.root).parts) <= 3), key=str.lower)
+        options = folders + [f'Neuer Ordner für „{subject}“ …']
+        drop = Gtk.DropDown.new_from_strings(options)
+        dlg = Adw.AlertDialog(heading=f'Ordner für {subject}', body='Beim nächsten Tippen auf die Karte öffnet sich dieser Ordner.')
+        dlg.set_extra_child(drop)
+        dlg.add_response('cancel', 'Abbrechen')
+        dlg.add_response('ok', 'Zuordnen')
+        dlg.set_response_appearance('ok', Adw.ResponseAppearance.SUGGESTED)
+
+        def done(d, res):
+            if d.choose_finish(res) != 'ok':
+                return
+            i = drop.get_selected()
+            if i < len(folders):
+                rel = folders[i]
+            else:
+                rel = f'{"Schule/" if (self.root / "Schule").is_dir() else ""}{clean_path(subject) or "Fach"}'
+                (self.root / rel).mkdir(parents=True, exist_ok=True)
+            self.school.set_folder(subject, rel)
+            self.refresh_tree()
+            self.show_area(rel)
+
+        dlg.choose(self, None, done)
+
+    def open_school(self):
+        entry = Gtk.Entry(text=self.school.link(), placeholder_text='https://…/ical/….ics')
+        dlg = Adw.AlertDialog(
+            heading='Stundenplan von Slotwise',
+            body='Kopiere in Slotwise unter Einstellungen → Kalender den Abo-Link („Slotwise abonnieren“) und füge ihn hier ein. '
+                 'In Slotwise muss unter „Schulplan“ dein vpmobil24-Zugang eingetragen sein. Leer lassen trennt die Verbindung.',
+        )
+        dlg.set_extra_child(entry)
+        dlg.add_response('cancel', 'Abbrechen')
+        dlg.add_response('ok', 'Verbinden')
+        dlg.set_response_appearance('ok', Adw.ResponseAppearance.SUGGESTED)
+
+        def done(d, res):
+            if d.choose_finish(res) != 'ok':
+                return
+            link = entry.get_text().strip()
+            if not link:
+                self.school.disconnect()
+                self.update_lesson()
+            elif not self.school.connect(link):
+                self.toast('Das ist kein Slotwise-Abo-Link')
+            else:
+                self.refresh_school(manual=True)
+
+        dlg.choose(self, None, done)
 
     def toast(self, msg: str):
         self.toasts.add_toast(Adw.Toast(title=msg, timeout=4))
@@ -840,7 +988,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _text(self):
         s, e = self.buffer.get_bounds()
-        return self.buffer.get_text(s, e, False)
+        return self.buffer.get_text(s, e, True)
 
     def flush_save(self):
         if self._save_timer:
@@ -857,33 +1005,56 @@ class MainWindow(Adw.ApplicationWindow):
         self.on_status('gespeichert')
         self.request_sync(delay=1500)
 
+    def _cursor_line(self) -> int:
+        return self.buffer.get_iter_at_mark(self.buffer.get_insert()).get_line()
+
+    def _on_cursor(self, *_):
+        """Wechselt der Cursor die Zeile, werden die Formatierungszeichen der alten Zeile wieder versteckt und die der neuen gezeigt."""
+        if self._loading or self._cursor_line() == self._hl_line:
+            return
+        self._highlight()
+
     def _highlight(self):
         b = self.buffer
         s, e = b.get_bounds()
         b.remove_all_tags(s, e)
-        text = b.get_text(s, e, False)
+        text = b.get_text(s, e, True)
         pos, fence = 0, False
+        cur = self._cursor_line()
+        self._hl_line = cur
         at = lambda a, z, tag: b.apply_tag_by_name(tag, b.get_iter_at_offset(a), b.get_iter_at_offset(z))
-        for line in text.split('\n'):
+        for ln, line in enumerate(text.split('\n')):
             end = pos + len(line)
+            hide = ln != cur  # Zeichen wie #, ** und ` nur in der Zeile zeigen, in der man gerade schreibt
             if re.match(r'^\s*```', line):
                 fence = not fence
                 at(pos, end, 'code')
             elif fence:
                 at(pos, end, 'code')
             else:
-                if (m := re.match(r'^(#{1,3}) ', line)):
-                    at(pos, end, f'h{len(m.group(1))}')
+                if (m := re.match(r'^(#{1,6}) ', line)):
+                    at(pos, end, f'h{min(len(m.group(1)), 3)}')
+                    if hide:
+                        at(pos, pos + m.end(), 'hidden')
                 elif line.startswith('> '):
                     at(pos, end, 'quote')
                 elif re.match(r'^\s*[-*] \[[xX]\] ', line):
                     at(pos, end, 'done')
                 for m in re.finditer(r'\*\*(.+?)\*\*', line):
                     at(pos + m.start(), pos + m.end(), 'bold')
+                    if hide:
+                        at(pos + m.start(), pos + m.start() + 2, 'hidden')
+                        at(pos + m.end() - 2, pos + m.end(), 'hidden')
                 for m in re.finditer(r'(?<![*\w])\*(?!\s|\*)(.+?)(?<!\s)\*(?![*\w])', line):
                     at(pos + m.start(), pos + m.end(), 'italic')
+                    if hide:
+                        at(pos + m.start(), pos + m.start() + 1, 'hidden')
+                        at(pos + m.end() - 1, pos + m.end(), 'hidden')
                 for m in re.finditer(r'`(.+?)`', line):
                     at(pos + m.start(), pos + m.end(), 'code')
+                    if hide:
+                        at(pos + m.start(), pos + m.start() + 1, 'hidden')
+                        at(pos + m.end() - 1, pos + m.end(), 'hidden')
             pos = end + 1
 
     # ---------- Formatieren (Markdown bleibt im Text sichtbar) ----------
@@ -910,7 +1081,7 @@ class MainWindow(Adw.ApplicationWindow):
             end = start.copy()
             if not end.ends_line():
                 end.forward_to_line_end()
-            line = b.get_text(start, end, False)
+            line = b.get_text(start, end, True)
             new = line[len(prefix):] if line.startswith(prefix) else prefix + ANY_PREFIX.sub('', line, count=1)
             b.delete(start, end)
             b.insert(start, new)
@@ -924,7 +1095,7 @@ class MainWindow(Adw.ApplicationWindow):
         b.begin_user_action()
         if b.get_has_selection():
             s, e = b.get_selection_bounds()
-            sel = b.get_text(s, e, False)
+            sel = b.get_text(s, e, True)
             if len(sel) >= 2 * len(mark) and sel.startswith(mark) and sel.endswith(mark):
                 new = sel[len(mark):-len(mark)]
             else:
@@ -972,6 +1143,27 @@ class MainWindow(Adw.ApplicationWindow):
             self.create_note(rel.removesuffix('.md') + '.md')
 
         self._ask('Neue Notiz', 'Ordner und Titel, getrennt mit /. Fehlende Ordner werden angelegt.', 'Anlegen', create, entry)
+
+    def new_folder(self):
+        """Neuer Ordner (auch verschachtelt, z. B. „Schule/Physik/Optik“); Standard ist der Ordner, in dem man gerade ist."""
+        here = nav.dir_of(self.current) if self.current else ('' if self.area.startswith('!') else self.area)
+        entry = Gtk.Entry(placeholder_text='Schule/Physik/Optik', activates_default=True, text=f'{here}/' if here else '')
+        entry.set_position(-1)
+
+        def create():
+            rel = clean_path(entry.get_text())
+            if not rel:
+                return
+            if (self.root / rel).exists():
+                self.toast('Den Ordner gibt es schon')
+            else:
+                (self.root / rel).mkdir(parents=True)
+                self.toast('Ordner angelegt. Zum Server geht er, sobald eine Notiz darin liegt.')
+            self.open_folders.update(d['path'] for d in nav.crumbs(rel + '/x'))
+            self.refresh_tree()
+            self.show_area(rel)
+
+        self._ask('Neuer Ordner', 'Ordner und Unterordner, getrennt mit /. Fehlende Ebenen werden angelegt.', 'Anlegen', create, entry)
 
     def delete_note(self):
         if not self.current:
