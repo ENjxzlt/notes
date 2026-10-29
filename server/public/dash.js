@@ -146,8 +146,25 @@ function taskList(paths, files, tasks) {
 }
 
 /** @param {{area:string, files:Map<string,{mtime:number}>, tasks:Map<string,{list:string[]}>, now?:Date}} ctx */
-export function dashHtml({ area, files, tasks, now = new Date() }) {
-  const all = [...files.keys()].filter((p) => p.endsWith('.md'));
+/** Eingabezeile „Idee festhalten“ (Übersicht, Bereiche und das Fenster mit Strg+Alt+I). */
+export function captureHtml(id = 'ideaInput') {
+  return `<form class="capture" data-capture>
+    <label class="sr-only" for="${id}">Idee festhalten</label>
+    <input id="${id}" type="text" placeholder="Idee festhalten …" autocomplete="off">
+    <button type="button" class="icon-btn boxed mic" data-act="dictate" aria-label="Diktieren" title="Diktieren" hidden><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
+    <button type="submit" class="btn primary">Festhalten</button>
+  </form>`;
+}
+
+function inboxCard(ideas) {
+  if (!ideas.length) return '';
+  const rows = ideas.slice(-4).reverse().map((i) => `<div class="item"><span class="grow2"><span class="t">${esc(i.text)}</span></span><span class="when">${esc(i.stamp.slice(11))}</span></div>`).join('');
+  return `<section class="panel"><div class="split"><h2>Inbox · ${plural(ideas.length, 'neue Idee', 'neue Ideen')}</h2><span class="muted small">Durchsicht am Sonntag</span></div>
+    <div class="list">${rows}</div><div class="actions"><button type="button" class="btn primary" data-go="!ideen">Jetzt durchsehen</button></div></section>`;
+}
+
+export function dashHtml({ area, files, tasks, ideas = [], now = new Date() }) {
+  const all = [...files.keys()].filter((p) => p.endsWith('.md') && p !== 'Inbox.md');
   const paths = all.filter((p) => inArea(p, area));
   const eyebrow = area
     ? esc(`${area}/`)
@@ -157,6 +174,8 @@ export function dashHtml({ area, files, tasks, now = new Date() }) {
     <div class="dash-actions"><button type="button" class="btn back" data-act="tree">Alle Notizen</button><button type="button" class="btn primary" data-act="new">Neue Notiz</button></div>
   </header>`;
   return `${head}
+    <section class="panel capture-panel">${captureHtml()}<p class="muted small">Landet in der Inbox, sortiert wird bei der Durchsicht. Strg+Alt+I öffnet das Fenster überall in der App.</p></section>
+    ${area ? '' : inboxCard(ideas)}
     ${folderCards(paths, files, tasks, area, all)}
     ${graph(paths, files, now)}
     <section class="two">

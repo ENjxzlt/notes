@@ -1,5 +1,7 @@
 import { renderMarkdown, esc } from './md.js';
-import { dashHtml, openTasks, when } from './dash.js';
+import { dashHtml, openTasks, when, captureHtml } from './dash.js';
+import { INBOX_FILE, stamp, parseIdeas, appendIdea, removeIdea, parseDue, taskLine, parseTasks, checkTask, appendLine, titleFromIdea } from './inbox.js';
+import { ideasHtml, tasksHtml, reviewHtml } from './ideas.js';
 import { folderCounts, folderPeers, pager, crumbs, pushRecent, togglePin, prune, search, titleOf } from './nav.js';
 
 const $ = (s, el = document) => el.querySelector(s);
@@ -66,7 +68,8 @@ async function pull() {
   return changed;
 }
 
-const mdFiles = () => [...files.keys()].filter((p) => p.endsWith('.md')).sort((a, b) => a.localeCompare(b, 'de'));
+// Die Inbox hat ihre eigene Ansicht (Durchsicht) und taucht nicht im Baum oder in Listen auf
+const mdFiles = () => [...files.keys()].filter((p) => p.endsWith('.md') && p !== INBOX_FILE).sort((a, b) => a.localeCompare(b, 'de'));
 
 // ---------- Baum ----------
 
@@ -579,9 +582,52 @@ function updateNav() {
   for (const b of $$('#nav [data-go]')) b.classList.toggle('active', top !== null && b.dataset.go === (top || ''));
 }
 
+let ideas = []; // Ideen aus Inbox.md
+let ideasRev = -1;
+let ideaIdx = 0;
+let ideaArea = 'Schule';
+let ideaMin = 45;
+let ideaDue = '';
+let taskFilter = '';
+
+/** Alle offenen Aufgaben (neueste Notizen zuerst), je mit Pfad. */
+const allTasks = () =>
+  mdFiles()
+    .sort((a, b) => files.get(b).mtime - files.get(a).mtime)
+    .flatMap((p) => (taskCache.get(p)?.parsed || []).map((t) => ({ ...t, path: p })));
+
+async function loadIdeas() {
+  const info = files.get(INBOX_FILE);
+  if (!info) {
+    ideas = [];
+    ideasRev = -1;
+    return;
+  }
+  if (info.rev === ideasRev) return;
+  try {
+    const r = await api('GET', `/api/file?path=${encodeURIComponent(INBOX_FILE)}`);
+    if (r.ok) {
+      ideas = parseIdeas(await r.text());
+      ideasRev = info.rev;
+    }
+  } catch {
+    /* bleibt beim alten Stand */
+  }
+}
+
+function updateCounts() {
+  $('#nIdeen').textContent = ideas.length ? String(ideas.length) : '';
+  $('#nAufgaben').textContent = allTasks().length ? String(allTasks().length) : '';
+}
+
 function drawDash() {
   for (const p of [...taskCache.keys()]) if (!files.has(p)) taskCache.delete(p);
-  $('#dash').innerHTML = dashHtml({ area, files, tasks: taskCache });
+  if (area === '!ideen') $('#dash').innerHTML = ideasHtml({ ideas, idx: ideaIdx, area: ideaArea, minutes: ideaMin, due: ideaDue });
+  else if (area === '!aufgaben') $('#dash').innerHTML = tasksHtml({ tasks: allTasks(), filter: taskFilter });
+  else if (area === '!rueckblick') $('#dash').innerHTML = reviewHtml({ notes: mdFiles().map((p) => ({ path: p, mtime: files.get(p).mtime })), tasks: allTasks(), ideas });
+  else $('#dash').innerHTML = dashHtml({ area, files, tasks: taskCache, ideas });
+  initMic($('#dash'));
+  updateCounts();
   const scroller = $('.act-scroll', $('#dash'));
   if (scroller) scroller.scrollLeft = scroller.scrollWidth; // wie bei GitHub: heute steht rechts
   updateNav();
@@ -599,7 +645,7 @@ async function loadTasks() {
           const r = await api('GET', `/api/file?path=${encodeURIComponent(p)}`);
           if (r.ok) {
             const text = await r.text();
-            taskCache.set(p, { rev, list: openTasks(text), text }); // der Text dient auch der Suche im Schnellwechsel
+            taskCache.set(p, { rev, list: openTasks(text), parsed: parseTasks(text), text }); // der Text dient auch der Suche im Schnellwechsel
           }
         } catch {
           /* bleibt ohne Aufgaben, bis zum nächsten Abgleich */
@@ -621,10 +667,16 @@ async function showDash(a = '') {
   $('#dash').hidden = false;
   $('#app').classList.add('reading');
   history.replaceState(null, '', a ? `#@${encodeURIComponent(a)}` : '#');
-  reveal(`${a}/x`);
+  if (!a.startsWith('!')) reveal(`${a}/x`);
   drawDash();
   renderTree();
   loadTasks();
+  loadIdeas().then(() => {
+    if (dashOn && area === a) {
+      drawDash();
+      renderTree();
+    }
+  });
   record({ t: 'a', p: a });
 }
 
@@ -736,14 +788,193 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// ---------- Ideen-Dump: festhalten, durchsehen, Aufgaben abhaken ----------
+
+let toastTimer = 0;
+function toast(msg) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.hidden = true), 2800);
+}
+
+/** Datei lesen, ändern und mit der gelesenen Revision zurückschreiben (bei Konflikt bis zu dreimal neu); wahr, wenn geschrieben wurde. */
+async function editFile(path, fn) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await api('GET', `/api/file?path=${encodeURIComponent(path)}`);
+    const text = r.ok ? await r.text() : '';
+    const base = r.ok ? Number(r.headers.get('x-rev')) : 0;
+    const next = fn(text);
+    if (next == null || next === text) return false;
+    const put = await api('PUT', `/api/file?path=${encodeURIComponent(path)}&base=${base}`, next);
+    if (put.ok) {
+      files.set(path, await put.json());
+      return true;
+    }
+    if (put.status !== 409) throw new Error(`HTTP ${put.status}`);
+  }
+  throw new Error('Konflikt, bitte nochmal versuchen');
+}
+
+async function afterChange() {
+  await loadIdeas();
+  renderTree();
+  if (dashOn) drawDash();
+  loadTasks();
+}
+
+async function addIdea(text) {
+  if (!text.trim()) return false;
+  try {
+    await editFile(INBOX_FILE, (c) => appendIdea(c, text, stamp()));
+  } catch (e) {
+    toast(`Konnte nicht festhalten: ${e.message}`);
+    return false;
+  }
+  toast('Festgehalten');
+  await afterChange();
+  return true;
+}
+
+async function ideaAction(kind) {
+  const idea = ideas[Math.min(ideaIdx, ideas.length - 1)];
+  if (!idea) return;
+  try {
+    if (kind === 'prev') ideaIdx = (ideaIdx - 1 + ideas.length) % ideas.length;
+    else if (kind === 'next' || kind === 'later') ideaIdx = (ideaIdx + 1) % ideas.length;
+    else if (kind === 'delete') {
+      if (!confirm(`Idee löschen?\n\n${idea.text}`)) return;
+      await editFile(INBOX_FILE, (c) => removeIdea(c, idea.raw));
+    } else if (kind === 'task') {
+      const due = ideaDue.trim() ? parseDue(ideaDue) : null;
+      if (ideaDue.trim() && !due) return toast('Frist nicht verstanden: Freitag, morgen oder 3.11.');
+      const path = `${ideaArea}/Aufgaben.md`;
+      await editFile(path, (c) => appendLine(c, 'Aufgaben', taskLine(idea.text, ideaMin, due)));
+      await editFile(INBOX_FILE, (c) => removeIdea(c, idea.raw));
+      ideaDue = '';
+      toast(`Aufgabe in ${path}`);
+    } else if (kind === 'note') {
+      const base = titleFromIdea(idea.text);
+      let name = base;
+      for (let n = 2; files.has(`${ideaArea}/${name}.md`); n++) name = `${base} ${n}`;
+      const path = `${ideaArea}/${name}.md`;
+      await editFile(path, () => `# ${name}\n\n${idea.text}\n`);
+      await editFile(INBOX_FILE, (c) => removeIdea(c, idea.raw));
+      toast(`Notiz: ${path}`);
+    }
+  } catch (e) {
+    toast(e.message);
+  }
+  await afterChange();
+}
+
+async function checkAt(i) {
+  const t = allTasks()[i];
+  if (!t) return;
+  try {
+    const done = await editFile(t.path, (txt) => checkTask(txt, t.line, t.title));
+    toast(done ? `Erledigt: ${t.title}` : 'Aufgabe hat sich geändert, bitte die Notiz öffnen');
+  } catch (e) {
+    toast(e.message);
+  }
+  taskCache.delete(t.path);
+  await afterChange();
+}
+
 $('#dash').addEventListener('click', (e) => {
   const go = e.target.closest('[data-go]');
   if (go) return showDash(go.dataset.go);
   const n = e.target.closest('[data-note]');
   if (n) return openNote(n.dataset.note);
+  const idea = e.target.closest('[data-idea]');
+  if (idea) return ideaAction(idea.dataset.idea);
+  const chk = e.target.closest('[data-check]');
+  if (chk) return checkAt(Number(chk.dataset.check));
+  const a = e.target.closest('[data-area]');
+  if (a) {
+    ideaArea = a.dataset.area;
+    return drawDash();
+  }
+  const m = e.target.closest('[data-min]');
+  if (m) {
+    ideaMin = Number(m.dataset.min);
+    return drawDash();
+  }
+  const tf = e.target.closest('[data-tf]');
+  if (tf) {
+    taskFilter = tf.dataset.tf;
+    return drawDash();
+  }
   const act = e.target.closest('[data-act]')?.dataset.act;
   if (act === 'new') $('#newBtn').click();
   if (act === 'tree') $('#app').classList.remove('reading');
+  if (act === 'dictate') dictate(e.target.closest('form')?.querySelector('input'));
+});
+
+$('#dash').addEventListener('input', (e) => {
+  if (e.target.id === 'dueInput') ideaDue = e.target.value;
+});
+
+$('#dash').addEventListener('submit', async (e) => {
+  const form = e.target.closest('[data-capture]');
+  if (!form) return;
+  e.preventDefault();
+  const input = form.querySelector('input');
+  if (await addIdea(input.value)) input.value = '';
+});
+
+// Diktieren über die Spracherkennung des Browsers (Chrome und Edge); sonst bleibt das Mikrofon unsichtbar
+const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+function initMic(root) {
+  if (!Speech) return;
+  for (const b of $$('.mic', root)) b.hidden = false;
+}
+function dictate(input) {
+  if (!Speech || !input) return;
+  const rec = new Speech();
+  rec.lang = 'de-DE';
+  rec.interimResults = false;
+  rec.onresult = (ev) => {
+    const t = ev.results[0]?.[0]?.transcript || '';
+    input.value = `${input.value} ${t}`.trim();
+    input.focus();
+  };
+  rec.onerror = () => toast('Spracherkennung nicht verfügbar');
+  rec.start();
+  toast('Sprich jetzt …');
+}
+
+// Fenster zum schnellen Festhalten (Strg+Alt+I), überall in der Web-Ansicht
+function openCapture() {
+  if ($('#app').hidden) return;
+  $('#capBody').innerHTML = captureHtml('capInput');
+  initMic($('#capBody'));
+  $('#cap').hidden = false;
+  $('#capInput').focus();
+}
+function closeCapture() {
+  $('#cap').hidden = true;
+}
+$('#capBody').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const input = $('#capInput');
+  if (await addIdea(input.value)) closeCapture();
+});
+$('#capBody').addEventListener('click', (e) => {
+  if (e.target.closest('[data-act="dictate"]')) dictate($('#capInput'));
+});
+$('#cap').addEventListener('click', (e) => {
+  if (e.target === $('#cap')) closeCapture();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.altKey && e.key.toLowerCase() === 'i') {
+    e.preventDefault();
+    if ($('#cap').hidden) openCapture();
+    else closeCapture();
+  } else if (e.key === 'Escape' && !$('#cap').hidden) {
+    closeCapture();
+  }
 });
 
 $('#nav').addEventListener('click', (e) => {
@@ -775,6 +1006,7 @@ async function refresh() {
   } catch {
     return;
   }
+  await loadIdeas();
   renderTree();
   if (dashOn) {
     drawDash();

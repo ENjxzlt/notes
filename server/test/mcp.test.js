@@ -61,10 +61,31 @@ test('ohne MCP_TOKEN gibt es den Zugang gar nicht', async () => {
   fs.rmSync(d, { recursive: true, force: true });
 });
 
-test('Werkzeuge: nur Lesen, Schreiben, Anhängen, Verlauf; kein Löschen', async () => {
+test('Werkzeuge: Lesen, Schreiben, Anhängen, Aufgaben, Verlauf; kein Löschen', async () => {
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ['append_note', 'list_notes', 'list_versions', 'read_note', 'restore_version', 'search_notes', 'write_note']);
+  assert.deepEqual(names, ['add_task', 'append_note', 'list_notes', 'list_tasks', 'list_versions', 'read_note', 'restore_version', 'search_notes', 'write_note']);
+});
+
+test('Aufgabe anlegen mit Dauer und Frist, wieder auflisten', async () => {
+  let r = await client.callTool({ name: 'add_task', arguments: { title: 'Übungsblatt 5 abgeben', area: 'Schule', minutes: 45, due: 'Freitag' } });
+  assert.ok(!r.isError, text(r));
+  assert.match(text(r), /Schule\/Aufgaben\.md/);
+  assert.match(text(r), /- \[ \] Übungsblatt 5 abgeben \(~45 min · bis \d{2}\.\d{2}\.\)/);
+  r = await client.callTool({ name: 'add_task', arguments: { title: 'Vokabeln lernen', area: 'Schule', minutes: 30 } });
+  assert.ok(!r.isError);
+  r = await client.callTool({ name: 'read_note', arguments: { path: 'Schule/Aufgaben.md' } });
+  assert.match(text(r), /^# Aufgaben\n\n- \[ \] Übungsblatt 5/);
+  assert.match(text(r), /- \[ \] Vokabeln lernen \(~30 min\)\n/);
+  r = await client.callTool({ name: 'list_tasks', arguments: { folder: 'Schule' } });
+  assert.match(text(r), /Schule\/Aufgaben\.md: Vokabeln lernen \(~30 min\)/);
+  r = await client.callTool({ name: 'add_task', arguments: { title: 'Mit unklarer Frist', area: 'Alltag', minutes: 10, due: 'irgendwann' } });
+  assert.equal(r.isError, true);
+  assert.match(text(r), /Frist nicht verstanden/);
+  r = await client.callTool({ name: 'add_task', arguments: { title: 'In eigener Notiz', area: 'Projekte', minutes: 20, note: 'Projekte/Notizen-App.md' } });
+  assert.ok(!r.isError);
+  r = await client.callTool({ name: 'add_task', arguments: { title: 'Unzulässiger Pfad', area: 'Alltag', minutes: 10, note: 'Alltag/datei.txt' } });
+  assert.equal(r.isError, true);
 });
 
 test('Auflisten, Lesen, Suchen', async () => {
