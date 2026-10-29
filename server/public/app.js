@@ -1,4 +1,5 @@
 import { renderMarkdown, esc } from './md.js';
+import { dashHtml, openTasks } from './dash.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -151,6 +152,8 @@ async function openNote(path) {
   editor.value = text;
   lastSaved = text;
   dirty = false;
+  dashOn = false;
+  $('#dash').hidden = true;
   $('#empty').hidden = true;
   $('#note').hidden = false;
   $('#banner').hidden = true;
@@ -160,6 +163,7 @@ async function openNote(path) {
   setStatus('');
   renderPreview();
   renderTree();
+  updateNav();
   history.replaceState(null, '', `#${encodeURIComponent(path)}`);
 }
 
@@ -409,11 +413,79 @@ $('#renameBtn').addEventListener('click', async () => {
 function closeNote() {
   current = null;
   dirty = false;
-  $('#note').hidden = true;
-  $('#empty').hidden = false;
-  $('#app').classList.remove('reading');
-  history.replaceState(null, '', '#');
+  showDash(area);
 }
+
+// ---------- Übersicht und Bereiche ----------
+
+let area = ''; // Ordnerpfad des gezeigten Dashboards, '' = Übersicht
+let dashOn = false;
+const taskCache = new Map(); // Pfad -> { rev, list } (offene Aufgaben je Notiz)
+let taskRun = 0;
+
+function updateNav() {
+  const top = dashOn ? area.split('/')[0] : current?.path.includes('/') ? current.path.split('/')[0] : null;
+  for (const b of $$('#nav [data-go]')) b.classList.toggle('active', top !== null && b.dataset.go === (top || ''));
+}
+
+function drawDash() {
+  for (const p of [...taskCache.keys()]) if (!files.has(p)) taskCache.delete(p);
+  $('#dash').innerHTML = dashHtml({ area, files, tasks: taskCache });
+  const scroller = $('.act-scroll', $('#dash'));
+  if (scroller) scroller.scrollLeft = scroller.scrollWidth; // wie bei GitHub: heute steht rechts
+  updateNav();
+}
+
+// Aufgaben stehen im Text: Notizen einmal holen (je Revision), vier gleichzeitig, Übersicht nach jedem Schub neu zeichnen.
+async function loadTasks() {
+  const run = ++taskRun;
+  const todo = mdFiles().filter((p) => taskCache.get(p)?.rev !== files.get(p).rev);
+  for (let i = 0; i < todo.length && run === taskRun; i += 4) {
+    await Promise.all(
+      todo.slice(i, i + 4).map(async (p) => {
+        const rev = files.get(p)?.rev;
+        try {
+          const r = await api('GET', `/api/file?path=${encodeURIComponent(p)}`);
+          if (r.ok) taskCache.set(p, { rev, list: openTasks(await r.text()) });
+        } catch {
+          /* bleibt ohne Aufgaben, bis zum nächsten Abgleich */
+        }
+      }),
+    );
+    if (run === taskRun && dashOn) drawDash();
+  }
+}
+
+async function showDash(a = '') {
+  if (current && dirty) await save();
+  current = null;
+  dirty = false;
+  area = a;
+  dashOn = true;
+  $('#note').hidden = true;
+  $('#empty').hidden = true;
+  $('#dash').hidden = false;
+  $('#app').classList.add('reading');
+  history.replaceState(null, '', a ? `#@${encodeURIComponent(a)}` : '#');
+  drawDash();
+  renderTree();
+  loadTasks();
+}
+
+$('#dash').addEventListener('click', (e) => {
+  const go = e.target.closest('[data-go]');
+  if (go) return showDash(go.dataset.go);
+  const n = e.target.closest('[data-note]');
+  if (n) return openNote(n.dataset.note);
+  const act = e.target.closest('[data-act]')?.dataset.act;
+  if (act === 'new') $('#newBtn').click();
+  if (act === 'tree') $('#app').classList.remove('reading');
+});
+
+$('#nav').addEventListener('click', (e) => {
+  const go = e.target.closest('[data-go]');
+  if (go) showDash(go.dataset.go);
+});
 
 // ---------- Live-Sync: der Server meldet jede Änderung sofort ----------
 
@@ -440,6 +512,10 @@ async function refresh() {
     return;
   }
   renderTree();
+  if (dashOn) {
+    drawDash();
+    loadTasks();
+  }
   if (!current) return;
   const info = files.get(current.path);
   if (!info) {
@@ -507,6 +583,7 @@ async function start() {
   renderTree();
   const hash = decodeURIComponent(location.hash.slice(1));
   if (hash && files.has(hash)) await openNote(hash);
+  else await showDash(hash.startsWith('@') ? hash.slice(1) : '');
   live();
 }
 
