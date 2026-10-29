@@ -484,17 +484,41 @@ class MainActivity : Activity(), SidePane.Host, DashPane.Host, QuickSwitcher.Hos
 
     private fun currentDir(): File = File(store.root, currentFolder())
 
-    override fun newNote() {
-        askText(this, "Neue Notiz", "") { name ->
-            val f = store.createNote(currentDir(), name)
+    override fun newNote() = newNoteIn(currentDir())
+
+    override fun newFolder() = newFolderIn(currentDir())
+
+    private fun where(dir: File) = if (dir == store.root) "Notizen" else dir.name
+
+    override fun newNoteIn(dir: File) {
+        askText(this, "Neue Notiz in ${where(dir)}", "") { name ->
+            val f = store.createNote(dir, name)
             if (f == null) toast("Name leer oder schon vergeben") else { refreshLists(); openNote(f); scheduleSync(500) }
         }
     }
 
-    override fun newFolder() {
-        askText(this, "Neuer Ordner", "") { name ->
-            if (store.createFolder(currentDir(), name) == null) toast("Name leer oder schon vergeben")
-            refreshLists()
+    /** Auch verschachtelt möglich ("Schule/Physik/Optik"); der neue Ordner wird geöffnet. */
+    override fun newFolderIn(dir: File) {
+        askText(this, "Neuer Ordner in ${where(dir)}", "") { name ->
+            val parts = name.split('/').map(store::cleanName).filter { it.isNotEmpty() }
+            val target = parts.fold(dir) { acc, seg -> File(acc, seg) }
+            when {
+                parts.isEmpty() -> toast("Name leer")
+                target.exists() -> toast("Den Ordner gibt es schon")
+                !target.mkdirs() -> toast("Ordner konnte nicht angelegt werden")
+                else -> {
+                    toast("Ordner angelegt. Zum Server geht er, sobald eine Notiz darin liegt.")
+                    refreshLists()
+                    if (wide) showScreen(Screen.Area(rel(target)))
+                }
+            }
+        }
+    }
+
+    /** Strg+Alt+I: Idee festhalten, wo man gerade ist (landet in der Inbox). */
+    private fun captureIdea() {
+        askText(this, "Idee festhalten", "") { text ->
+            if (vault.addIdea(text)) { toast("Festgehalten"); changed() }
         }
     }
 
@@ -535,6 +559,10 @@ class MainActivity : Activity(), SidePane.Host, DashPane.Host, QuickSwitcher.Hos
 
     /** Tastaturkürzel am Tablet mit Tastatur: Strg+K Schnellwechsel, Strg+N neue Notiz, Alt+←/→ Zurück/Vor. */
     override fun dispatchKeyEvent(ev: KeyEvent): Boolean {
+        if (started && ev.action == KeyEvent.ACTION_DOWN && inkScreen == null && ev.isCtrlPressed && ev.isAltPressed && ev.keyCode == KeyEvent.KEYCODE_I) {
+            captureIdea()
+            return true
+        }
         if (started && wide && ev.action == KeyEvent.ACTION_DOWN && inkScreen == null) {
             when {
                 ev.isCtrlPressed && ev.keyCode == KeyEvent.KEYCODE_K -> { if (quick?.isShowing != true) quick(); return true }

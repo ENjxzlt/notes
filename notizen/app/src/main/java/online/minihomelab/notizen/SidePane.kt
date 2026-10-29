@@ -31,6 +31,8 @@ class SidePane(
         fun forward()
         fun newNote()
         fun newFolder()
+        fun newNoteIn(dir: File)
+        fun newFolderIn(dir: File)
         fun more()
         fun lesson(longPress: Boolean)
         fun removed(f: File)
@@ -117,6 +119,7 @@ class SidePane(
                 addView(listBox)
             })
         }
+        scroll.setOnContextClickListener { rootMenu(); true }
         addView(scroll, LayoutParams(MATCH_PARENT, 0, 1f))
         addView(hairline(ctx, false))
 
@@ -173,7 +176,10 @@ class SidePane(
             }, LayoutParams(0, WRAP_CONTENT, 1f))
             if (meta.isNotEmpty()) addView(Ui.label(context, meta, 11f, if (selected) Ui.ACCENT else Ui.FAINT, Ui.mono), LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { leftMargin = 8.dp() })
             setOnClickListener { click() }
-            if (long != null) setOnLongClickListener { long(); true }
+            if (long != null) {
+                setOnLongClickListener { long(); true }
+                setOnContextClickListener { long(); true } // Rechtsklick mit der Maus
+            }
         }
 
     private fun label(text: String): View = Ui.label(context, text.uppercase(), 11f, Ui.MUTED, Ui.mono).apply {
@@ -244,10 +250,28 @@ class SidePane(
 
     // ---- Umbenennen und Löschen (langes Drücken) ----
 
+    /** Langes Drücken oder Rechtsklick: Neue Notiz/Ordner im Ordner (bei einer Notiz in ihrem), Umbenennen, Löschen. */
     private fun itemMenu(f: File) {
+        val dir = if (f.isDirectory) f else (f.parentFile ?: store.root)
+        val where = if (dir == store.root) "Notizen" else dir.name
         AlertDialog.Builder(context)
             .setTitle(if (f.isDirectory) f.name else f.nameWithoutExtension)
-            .setItems(arrayOf("Umbenennen", "Löschen")) { _, which -> if (which == 0) rename(f) else confirmDelete(f) }
+            .setItems(arrayOf("Neue Notiz in „$where“", "Neuer Ordner in „$where“", "Umbenennen", "Löschen")) { _, which ->
+                when (which) {
+                    0 -> host.newNoteIn(dir)
+                    1 -> host.newFolderIn(dir)
+                    2 -> rename(f)
+                    else -> confirmDelete(f)
+                }
+            }
+            .show()
+    }
+
+    /** Rechtsklick auf leeren Platz in der Liste: im Notizen-Ordner anlegen. */
+    private fun rootMenu() {
+        AlertDialog.Builder(context)
+            .setTitle("Notizen")
+            .setItems(arrayOf("Neue Notiz", "Neuer Ordner")) { _, which -> if (which == 0) host.newNoteIn(store.root) else host.newFolderIn(store.root) }
             .show()
     }
 
