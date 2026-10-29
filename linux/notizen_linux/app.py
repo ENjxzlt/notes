@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +18,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from . import config as cfgmod  # noqa: E402
 from . import dash  # noqa: E402
-from . import ideas_ui, nav, schoolplan  # noqa: E402
+from . import editing, ideas_ui, nav, schoolplan  # noqa: E402
 from . import inbox  # noqa: E402
 from .sync import AuthError, Client, ServerError, Syncer, sha256  # noqa: E402
 
@@ -273,8 +274,7 @@ class MainWindow(Adw.ApplicationWindow):
         for name, area, icon in (
             ('Übersicht', '', 'view-grid-symbolic'), ('Inbox', '!ideen', 'mail-inbox-symbolic'),
             ('Aufgaben', '!aufgaben', 'object-select-symbolic'), ('Rückblick', '!rueckblick', 'x-office-calendar-symbolic'),
-            ('Schule', 'Schule', 'folder-symbolic'), ('Projekte', 'Projekte', 'folder-symbolic'), ('Alltag', 'Alltag', 'folder-symbolic'),
-        ):
+        ):  # Bereiche stehen nur noch als Ordner im Baum (wie in der Android-App)
             row = Gtk.ListBoxRow()
             row.area = area
             b = Gtk.Box(spacing=10, margin_top=6, margin_bottom=6)
@@ -406,11 +406,18 @@ class MainWindow(Adw.ApplicationWindow):
         t('code', family='monospace', background='#8884')
         t('quote', foreground='#888888')
         t('done', strikethrough=True, foreground='#888888')
+        t('marker', foreground='#5b86ea', weight=600)
         t('hidden', invisible=True)  # Formatierungszeichen (#, **, *, `) außerhalb der Cursor-Zeile
         self.text = Gtk.TextView(buffer=self.buffer, wrap_mode=Gtk.WrapMode.WORD_CHAR, left_margin=28, right_margin=28, top_margin=22, bottom_margin=60, pixels_below_lines=4)
         self.text.add_css_class('note-text')
         self.buffer.connect('changed', self._on_changed)
         self.buffer.connect('notify::cursor-position', self._on_cursor)
+        keys = Gtk.EventControllerKey()
+        keys.connect('key-pressed', self._on_text_key)
+        self.text.add_controller(keys)
+        tap = Gtk.GestureClick(button=1)
+        tap.connect('pressed', self._on_text_tap)
+        self.text.add_controller(tap)
         self._hl_line = -1
         sc = Gtk.ScrolledWindow(vexpand=True)
         sc.set_child(Adw.Clamp(maximum_size=860, child=self.text))
@@ -446,6 +453,7 @@ class MainWindow(Adw.ApplicationWindow):
         if not special and self._reveal(area + '/x' if area else ''):
             GLib.idle_add(self._idle_tree)  # nicht mitten im Auswahl-Signal des Baums neu aufbauen
         self._render_side()
+        self._select_in_tree()
         self.build_dash()
         self.stack.set_visible_child_name('dash')
         self._record('a', area)
@@ -472,6 +480,7 @@ class MainWindow(Adw.ApplicationWindow):
         counts = nav.folder_counts([n.path for n in notes])
         store = Gtk.TreeStore(str, str, bool, str, str)
         nodes = {}
+        self._rows = {}
         # erst alle Ordner (auch leere), dann die Notizen: Ordner stehen so vor den Notizen ihrer Ebene
         for d in sorted(dash.dirs(self.root), key=str.lower):
             acc = ''
@@ -481,14 +490,16 @@ class MainWindow(Adw.ApplicationWindow):
                 if acc not in nodes:
                     nodes[acc] = store.append(parent, [seg, acc, True, str(counts.get(acc, 0)), 'folder-symbolic'])
         for n in sorted(notes, key=lambda n: (nav.dir_of(n.path).lower(), nav.title_of(n.path).lower())):
-            store.append(nodes.get(nav.dir_of(n.path)), [nav.title_of(n.path), n.path, False, dash.when(n.mtime), 'text-x-generic-symbolic'])
+            self._rows[n.path] = store.append(nodes.get(nav.dir_of(n.path)), [nav.title_of(n.path), n.path, False, dash.when(n.mtime), 'text-x-generic-symbolic'])
         self._tree_lock = True
         self.tree.set_model(store)
         self.store = store
+        self._rows.update(nodes)
         for acc, it in nodes.items():
             if acc in self.open_folders:
                 self.tree.expand_row(store.get_path(it), False)
         self._tree_lock = False
+        self._select_in_tree()
         self._render_side()
 
     def _path_at(self, x: float, y: float):
@@ -500,21 +511,25 @@ class MainWindow(Adw.ApplicationWindow):
         return hit
 
     def _on_tree_rclick(self, _g, _n, x, y):
-        folder = ''
+        folder, item = '', None
         path = self._path_at(x, y) if self.store else None
         if path is not None:
             it = self.store.get_iter(path)
-            folder = nav.ctx_folder(self.store.get_value(it, 1), self.store.get_value(it, 2))
-        self.tree_menu(folder, x, y)
+            item = (self.store.get_value(it, 1), self.store.get_value(it, 2))
+            folder = nav.ctx_folder(*item)
+        self.tree_menu(folder, x, y, item)
 
-    def tree_menu(self, folder: str, x: float, y: float):
+    def tree_menu(self, folder: str, x: float, y: float, item: tuple[str, bool] | None = None):
         """Kleines Menü an der Maus: Neue Notiz hier, Neuer Ordner hier."""
         pop = Gtk.Popover(has_arrow=False)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, margin_top=4, margin_bottom=4, margin_start=4, margin_end=4)
         box.append(label(f'In „{folder.split("/")[-1]}“' if folder else 'Im Notizen-Ordner', ['caption', 'dim-label']))
         box.get_first_child().set_margin_start(10)
         box.get_first_child().set_margin_bottom(4)
-        for text, fn in (('Neue Notiz hier …', lambda: self.new_note(folder)), ('Neuer Ordner hier …', lambda: self.new_folder(folder))):
+        entries = [('Neue Notiz hier …', lambda: self.new_note(folder)), ('Neuer Ordner hier …', lambda: self.new_folder(folder))]
+        if item:
+            entries += [('Umbenennen …', lambda: self.rename_item(*item)), ('Löschen …', lambda: self.delete_item(*item))]
+        for text, fn in entries:
             b = Gtk.Button(label=text, halign=Gtk.Align.FILL)
             b.add_css_class('flat')
             b.get_child().set_halign(Gtk.Align.START)
@@ -530,11 +545,110 @@ class MainWindow(Adw.ApplicationWindow):
         pop.popup()
         return pop
 
+    # ---------- Umbenennen und Löschen (Rechtsklick) ----------
+
+    def _overlay_files(self, rel: str) -> list[Path]:
+        """Zeichenebene einer Notiz (.ink/_page_<Name>.json/.svg): folgt der Notiz, wie in der Android-App."""
+        d = (self.root / rel).parent / '.ink'
+        stem = Path(rel).stem
+        return [f for f in (d / f'_page_{stem}.json', d / f'_page_{stem}.svg') if f.exists()]
+
+    def _remap(self, old: str, new: str) -> None:
+        sub = lambda p: new + p[len(old):] if p == old or p.startswith(old + '/') else p  # noqa: E731
+        self.pins = [sub(p) for p in self.pins]
+        self.recents = [sub(p) for p in self.recents]
+        self.open_folders = {sub(p) for p in self.open_folders}
+        self.hist = [(k, sub(p)) for k, p in self.hist]
+        self._save_nav()
+
+    def rename_item(self, rel: str, is_folder: bool):
+        old = self.root / rel
+        entry = Gtk.Entry(text=old.name if is_folder else old.stem, activates_default=True)
+        entry.select_region(0, -1)
+        self._ask('Umbenennen', 'Neuer Name (nur der Name, nicht der Pfad).', 'Umbenennen', lambda: self._do_rename(rel, is_folder, entry.get_text()), entry)
+
+    def _do_rename(self, rel: str, is_folder: bool, raw: str) -> str | None:
+        """Benennt um und zieht Pins, Verlauf, Ordnerstand und die offene Ansicht nach; liefert den neuen Pfad (None, wenn nichts geschah)."""
+        name = clean_path(raw).replace('/', '-')
+        if not name:
+            return None
+        new_rel = (nav.dir_of(rel) + '/' if nav.dir_of(rel) else '') + (name if is_folder else name.removesuffix('.md') + '.md')
+        if new_rel == rel:
+            return None
+        if (self.root / new_rel).exists():
+            self.toast('Name schon vergeben')
+            return None
+        self.flush_save()
+        overlays = [] if is_folder else self._overlay_files(rel)
+        (self.root / rel).rename(self.root / new_rel)
+        for f in overlays:
+            f.rename(f.with_name(f'_page_{Path(new_rel).stem}{f.suffix}'))
+        was_note = self.current if self.current and (self.current == rel or self.current.startswith(rel + '/')) else None
+        was_area = self.area if not self.current and (self.area == rel or self.area.startswith(rel + '/')) else None
+        self._remap(rel, new_rel)
+        self.request_sync(delay=500)
+        self.refresh_tree()
+        if was_note:
+            self.current = None
+            self.open_note(new_rel + was_note[len(rel):])
+        elif was_area is not None:
+            self.show_area(new_rel + was_area[len(rel):])
+        else:
+            self._render_side()
+        return new_rel
+
+    def delete_item(self, rel: str, is_folder: bool):
+        what = f'Ordner „{Path(rel).name}“ mit allem Inhalt' if is_folder else f'Notiz „{Path(rel).stem}“'
+        dlg = Adw.AlertDialog(heading='Löschen?', body=f'{what} wird auch auf dem Server und auf anderen Geräten gelöscht. Es gibt keinen Papierkorb.')
+        dlg.add_response('cancel', 'Abbrechen')
+        dlg.add_response('ok', 'Löschen')
+        dlg.set_response_appearance('ok', Adw.ResponseAppearance.DESTRUCTIVE)
+        dlg.choose(self, None, lambda d, res: d.choose_finish(res) == 'ok' and self._do_delete(rel, is_folder))
+
+    def _do_delete(self, rel: str, is_folder: bool) -> None:
+        inside = self.current is not None and (self.current == rel or self.current.startswith(rel + '/'))
+        if inside:
+            self.dirty = False  # nicht noch einmal speichern, die Datei ist gleich weg
+            self.flush_save()
+        target = self.root / rel
+        if is_folder:
+            shutil.rmtree(target, ignore_errors=True)
+        else:
+            for f in self._overlay_files(rel):
+                f.unlink(missing_ok=True)
+            target.unlink(missing_ok=True)
+        gone = lambda p: p == rel or p.startswith(rel + '/')  # noqa: E731
+        self.pins = [p for p in self.pins if not gone(p)]
+        self.recents = [p for p in self.recents if not gone(p)]
+        self.open_folders = {p for p in self.open_folders if not gone(p)}
+        self._save_nav()
+        self.request_sync(delay=500)
+        self.refresh_tree()
+        if inside:
+            self.show_area(nav.dir_of(rel))
+        else:
+            self._render_side()
+
     def _remember(self, it, opened):
         if getattr(self, '_tree_lock', False):
             return
         path = self.store.get_value(it, 1)
         (self.open_folders.add if opened else self.open_folders.discard)(path)
+
+    def _select_in_tree(self):
+        """Markiert im Baum die offene Notiz oder den gezeigten Ordner (ohne sie zu öffnen)."""
+        if not self.store:
+            return
+        key = self.current or ('' if self.area.startswith('!') else self.area)
+        it = getattr(self, '_rows', {}).get(key) if key else None
+        self._tree_lock = True
+        sel = self.tree.get_selection()
+        if it is None:
+            sel.unselect_all()
+        else:
+            sel.select_iter(it)
+            self.tree.scroll_to_cell(self.store.get_path(it), None, False, 0, 0)
+        self._tree_lock = False
 
     def _on_tree_selection(self, sel):
         if getattr(self, '_tree_lock', False):
@@ -679,6 +793,7 @@ class MainWindow(Adw.ApplicationWindow):
         if self._reveal(rel):
             GLib.idle_add(self._idle_tree)  # nicht mitten im Auswahl-Signal des Baums neu aufbauen
         self._render_side()
+        self._select_in_tree()
         self._render_note_nav(rel)
         self.title_stack.set_visible_child_name('crumb')
         self.stack.set_visible_child_name('note')
@@ -1047,6 +1162,53 @@ class MainWindow(Adw.ApplicationWindow):
         self.on_status('gespeichert')
         self.request_sync(delay=1500)
 
+    def _line_at(self, it) -> tuple[Gtk.TextIter, Gtk.TextIter, str]:
+        start = self.buffer.get_iter_at_line(it.get_line())[1]
+        end = start.copy()
+        if not end.ends_line():
+            end.forward_to_line_end()
+        return start, end, self.buffer.get_text(start, end, True)
+
+    def _on_text_key(self, _c, keyval, _code, state):
+        """Enter in einer Liste: nächster Punkt (Nummern zählen hoch); Enter auf leerem Punkt beendet die Liste."""
+        if keyval not in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) or state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK | Gdk.ModifierType.SHIFT_MASK):
+            return False
+        b = self.buffer
+        if not self.current or b.get_has_selection():
+            return False
+        it = b.get_iter_at_mark(b.get_insert())
+        start, end, line = self._line_at(it)
+        if not it.equal(end):
+            return False
+        nxt = editing.continue_list(line)
+        if nxt is None:
+            return False
+        b.begin_user_action()
+        if nxt == '':
+            b.delete(start, end)
+        else:
+            b.insert_at_cursor('\n' + nxt)
+        b.end_user_action()
+        return True
+
+    def _on_text_tap(self, _g, _n, x, y):
+        """Klick auf „[ ]“ oder „[x]“ schaltet die Aufgabe um (Cursor und Auswahl bleiben unberührt)."""
+        if not self.current:
+            return
+        bx, by = self.text.window_to_buffer_coords(Gtk.TextWindowType.WIDGET, int(x), int(y))
+        hit = self.text.get_iter_at_location(bx, by)
+        it = next((h for h in hit if isinstance(h, Gtk.TextIter)), None) if isinstance(hit, tuple) else hit
+        if it is None:
+            return
+        start, end, line = self._line_at(it)
+        new = editing.toggle_checkbox(line, it.get_line_offset())
+        if new is None:
+            return
+        self.buffer.begin_user_action()
+        self.buffer.delete(start, end)
+        self.buffer.insert(self.buffer.get_iter_at_line(it.get_line())[1], new)
+        self.buffer.end_user_action()
+
     def _cursor_line(self) -> int:
         return self.buffer.get_iter_at_mark(self.buffer.get_insert()).get_line()
 
@@ -1082,6 +1244,8 @@ class MainWindow(Adw.ApplicationWindow):
                     at(pos, end, 'quote')
                 elif re.match(r'^\s*[-*] \[[xX]\] ', line):
                     at(pos, end, 'done')
+                if (lm := re.match(r'^(\s*)(- \[[ xX]\] |- |\* |\d+\. )', line)):
+                    at(pos + len(lm.group(1)), pos + lm.end(), 'marker')
                 for m in re.finditer(r'\*\*(.+?)\*\*', line):
                     at(pos + m.start(), pos + m.end(), 'bold')
                     if hide:

@@ -203,8 +203,55 @@ def s5d():
     # Zeile unter der Maus: die erste Zeile des Baums liegt oben links
     p = w._path_at(30, 12)
     it = w.store.get_iter(p) if p is not None else None
-    check('Baumzeile unter der Maus wird gefunden', it is not None and w.store.get_value(it, 1) in ('Alltag', 'Projekte', 'Schule'), str(p))
+    check('Baumzeile unter der Maus wird gefunden', it is not None and w.store.get_value(it, 1) in w._rows, str(p))
     check('Zwischen den Zeilen (weit unten) trifft der Klick keine Zeile', w._path_at(30, 5000) is None)
+
+
+@step(18800)
+def s5e():
+    from gi.repository import Gdk
+    w = app.win
+    w.open_note('Schule/Physik/Schnell.md')
+    w.buffer.set_text('- Punkt eins')
+    w.buffer.place_cursor(w.buffer.get_end_iter())
+    handled = w._on_text_key(None, Gdk.KEY_Return, 0, 0)
+    check('Enter in einer Liste setzt sie fort', handled and w._text() == '- Punkt eins\n- ', repr(w._text()))
+    handled = w._on_text_key(None, Gdk.KEY_Return, 0, 0)
+    check('Enter auf leerem Punkt beendet die Liste', handled and w._text() == '- Punkt eins\n', repr(w._text()))
+    w.buffer.set_text('Kein Listentext')
+    w.buffer.place_cursor(w.buffer.get_end_iter())
+    check('Außerhalb von Listen bleibt Enter normal', not w._on_text_key(None, Gdk.KEY_Return, 0, 0))
+    # Umbenennen und Löschen
+    w.flush_save()
+    (w.root / 'Schule/Physik/.ink').mkdir(parents=True, exist_ok=True)
+    (w.root / 'Schule/Physik/.ink/_page_Schnell.json').write_text('{}')
+    w.pins = ['Schule/Physik/Schnell.md']
+    new = w._do_rename('Schule/Physik/Schnell.md', False, 'Umbenannt')
+    check('Notiz umbenannt, Pin und offene Notiz folgen', new == 'Schule/Physik/Umbenannt.md' and w.current == new and new in w.pins and (w.root / new).exists())
+    check('Zeichenebene folgt dem Namen', (w.root / 'Schule/Physik/.ink/_page_Umbenannt.json').exists() and not (w.root / 'Schule/Physik/.ink/_page_Schnell.json').exists())
+    check('Name schon vergeben wird abgelehnt', w._do_rename('Schule/Physik/Umbenannt.md', False, 'Elektrisches Feld') is None)
+    new_dir = w._do_rename('Schule/Optik', True, 'Licht')
+    check('Ordner umbenannt', new_dir == 'Schule/Licht' and (w.root / 'Schule/Licht/Leer').is_dir())
+    w._do_delete('Schule/Licht', True)
+    check('Ordner gelöscht', not (w.root / 'Schule/Licht').exists())
+    w._do_delete('Schule/Physik/Umbenannt.md', False)
+    check('Notiz samt Zeichenebene gelöscht, Pin weg, Ansicht zurück', not (w.root / 'Schule/Physik/Umbenannt.md').exists() and not (w.root / 'Schule/Physik/.ink/_page_Umbenannt.json').exists() and not w.pins and w.current is None)
+
+
+@step(18900)
+def s5f():
+    w = app.win
+    areas = []
+    i = 0
+    while (r := w.nav.get_row_at_index(i)) is not None:
+        areas.append(r.area)
+        i += 1
+    check('Oben nur noch Übersicht, Inbox, Aufgaben, Rückblick (keine Bereichs-Tabs)', areas == ['', '!ideen', '!aufgaben', '!rueckblick'], str(areas))
+    w.show_area('Schule')
+    _m, it = w.tree.get_selection().get_selected()
+    check('Der gezeigte Ordner ist im Baum markiert', it is not None and w.store.get_value(it, 1) == 'Schule')
+    w.show_area('')
+    check('Übersicht: im Baum ist nichts markiert', w.tree.get_selection().get_selected()[1] is None)
 
 
 @step(19000)
