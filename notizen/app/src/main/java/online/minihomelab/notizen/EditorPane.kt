@@ -61,6 +61,15 @@ class EditorPane(
     }
     private val statusIcon = Ui.icon(ctx, R.drawable.ic_check, Ui.FAINT, 14).apply { visibility = INVISIBLE }
     private val status = Ui.label(ctx, "", 12f, Ui.FAINT, Ui.mono)
+
+    /** Platz rechts im Kopf für Blättern und Anpinnen (füllt die Activity im breiten Layout). */
+    val tools = LinearLayout(ctx).apply {
+        orientation = HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+    }
+
+    /** Tippen auf den Pfad im Kopf (zeigt die Geschwister-Ordner). */
+    var onTitleTap: (() -> Unit)? = null
     private val hint = Ui.label(ctx, "Notiz links wählen oder neu anlegen.", 15f, Ui.MUTED).apply {
         gravity = Gravity.CENTER
     }
@@ -129,6 +138,9 @@ class EditorPane(
             addView(title, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { if (showBack) leftMargin = ctx.dp(8) })
             addView(statusIcon, LayoutParams(ctx.dp(14), ctx.dp(14)).apply { rightMargin = ctx.dp(6) })
             addView(status)
+            addView(tools, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply { leftMargin = ctx.dp(12) })
+            title.isClickable = true
+            title.setOnClickListener { onTitleTap?.invoke() }
         }
         addView(header, LayoutParams(LayoutParams.MATCH_PARENT, ctx.dp(52)))
         addView(hairline(ctx, false))

@@ -3,8 +3,10 @@ package online.minihomelab.notizen
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -12,21 +14,27 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.speech.RecognizerIntent
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.TextView
 import android.widget.Toast
 import java.io.File
+import java.util.Locale
 
-class MainActivity : Activity() {
+class MainActivity : Activity(), SidePane.Host, DashPane.Host, QuickSwitcher.Host {
     private lateinit var store: NoteStore
-    private lateinit var tree: TreePane
+    private lateinit var vault: Vault
+    private var tree: TreePane? = null // schmal: Ordnerliste wie bisher
+    private var side: SidePane? = null // breit (Tablet): Seitenleiste wie am PC
+    private var dash: DashPane? = null
     private lateinit var editor: EditorPane
+    private var quick: QuickSwitcher? = null
     private var wide = false
     private var started = false
     private lateinit var frame: FrameLayout
@@ -34,6 +42,7 @@ class MainActivity : Activity() {
     private var inkDir: File? = null
     private var inkId: String? = null
     private var currentLesson: SchoolPlan.Lesson? = null
+    private var lessonCard: SchoolPlan.Card? = null
     private var tick = 0
     private val syncRunnable = Runnable { syncNow(false) }
     private val handler = Handler(Looper.getMainLooper())
@@ -44,6 +53,19 @@ class MainActivity : Activity() {
             handler.postDelayed(this, 60_000)
         }
     }
+
+    // Breites Layout: was gerade gezeigt wird, Pins, Verlauf, Zurück/Vor
+    private var screen: Screen = Screen.Overview
+    private var noteOpen: String? = null
+    private var pins: List<String> = emptyList()
+    private var recents: List<String> = emptyList()
+    private val hist = ArrayList<Pair<Char, String>>() // ('n', Notiz) oder ('a', Bereich/Screen-Name)
+    private var hi = -1
+    private var navLock = false
+    private var dictateCallback: ((String) -> Unit)? = null
+    private lateinit var pinBtn: ImageView
+    private lateinit var prevBtn: ImageView
+    private lateinit var nextBtn: ImageView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -56,6 +78,12 @@ class MainActivity : Activity() {
         // Zurück aus den Systemeinstellungen, in denen der Zugriff erlaubt wurde
         if (!started && hasAccess()) startApp()
         if (started) startTicker()
+    }
+
+    /** Fenster vergrößert/verkleinert (Tablet, Fenstermodus): Layout neu aufbauen, wenn sich breit/schmal ändert. */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (started && inkScreen == null && (newConfig.screenWidthDp >= WIDE_DP) != wide) buildLayout()
     }
 
     private fun startTicker() {
@@ -77,7 +105,7 @@ class MainActivity : Activity() {
         if (!started || !Sync.isConnected(this)) return
         editor.flush()
         Sync.run(this, store) { res ->
-            tree.refresh()
+            refreshLists()
             editor.reloadIfChanged()
             if (manual) {
                 Toast.makeText(this, if (res.error != null) "Sync fehlgeschlagen: ${res.error}" else Sync.lastStatus(this), Toast.LENGTH_LONG).show()
@@ -90,14 +118,25 @@ class MainActivity : Activity() {
         handler.postDelayed(syncRunnable, delayMs)
     }
 
+    /** Listen und Zähler neu zeichnen (nach Sync, Anlegen, Löschen). */
+    private fun refreshLists() {
+        tree?.refresh()
+        side?.refresh()
+        if (noteOpen == null) dash?.refresh()
+    }
+
     private fun updateCard() {
         if (!started) return
         val next = if (SchoolPlan.isConnected(this)) SchoolPlan.upcoming(this) else null
         currentLesson = next?.first
-        tree.setLesson(next?.let { SchoolPlan.card(it.first, it.second) })
+        lessonCard = next?.let { SchoolPlan.card(it.first, it.second) }
+        tree?.setLesson(lessonCard)
+        side?.setLesson(lessonCard)
     }
 
     /** Karte angetippt: Fach-Ordner öffnen; beim ersten Mal (oder langem Drücken) Ordner zuordnen. */
+    override fun lesson(longPress: Boolean) = onLessonCard(longPress)
+
     private fun onLessonCard(longPress: Boolean) {
         val lesson = currentLesson ?: return
         val folder = SchoolPlan.folderFor(this, store, lesson.subject)
@@ -109,8 +148,12 @@ class MainActivity : Activity() {
     }
 
     private fun openFolder(f: File) {
-        tree.openDir(f)
-        if (!wide) showTree()
+        if (wide) {
+            go(Screen.Area(f.relativeTo(store.root).path.replace(File.separatorChar, '/')))
+        } else {
+            tree?.openDir(f)
+            showTree()
+        }
     }
 
     // ---- Speicherzugriff: Notizen liegen als normale Dateien im Ordner "Notizen" des Gerätespeichers ----
@@ -165,35 +208,65 @@ class MainActivity : Activity() {
     private fun startApp() {
         started = true
         store = NoteStore(File(Environment.getExternalStorageDirectory(), "Notizen"))
+        vault = Vault(store)
         migrateOldNotes()
-        // Breites Tablet: Baum links, Editor rechts. Schmal: eins nach dem anderen.
-        wide = resources.configuration.screenWidthDp >= 720
+        pins = loadList("pins")
+        recents = loadList("recents")
+        buildLayout()
+        Updater.check(this)
+    }
 
-        tree = TreePane(this, store, ::openNote, ::onRemoved, ::moreMenu, ::onLessonCard)
+    private fun loadList(key: String): List<String> =
+        getPreferences(MODE_PRIVATE).getString(key, "")!!.split('\n').filter { it.isNotEmpty() }
+
+    private fun saveList(key: String, list: List<String>) =
+        getPreferences(MODE_PRIVATE).edit().putString(key, list.joinToString("\n")).apply()
+
+    /** (Neu) aufbauen: breit (Tablet) = Seitenleiste + Inhalt wie am PC, schmal = Ordnerliste und Editor nacheinander. */
+    private fun buildLayout() {
+        if (this::editor.isInitialized) editor.flush()
+        val reopen = if (this::editor.isInitialized) editor.file else null
+        wide = resources.configuration.screenWidthDp >= WIDE_DP
+
         editor = EditorPane(this, store, showBack = !wide, onBack = ::showTree, onInk = ::openInk)
-
+        editor.onSaved = { scheduleSync() }
         val root = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+
         if (wide) {
-            root.addView(tree, LinearLayout.LayoutParams(dp(340), MATCH_PARENT))
+            tree = null
+            side = SidePane(this, vault, this).also {
+                it.pins = pins
+                it.recents = recents
+            }
+            dash = DashPane(this, vault, this)
+            val content = FrameLayout(this).apply {
+                addView(dash, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+                addView(editor, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+            }
+            buildNoteTools()
+            editor.onTitleTap = { noteOpen?.let(::showPeers) }
+            root.addView(side, LinearLayout.LayoutParams(dp(320), MATCH_PARENT))
             root.addView(hairline(this, true))
-            root.addView(editor, LinearLayout.LayoutParams(0, MATCH_PARENT, 1f))
+            root.addView(content, LinearLayout.LayoutParams(0, MATCH_PARENT, 1f))
         } else {
+            side = null
+            dash = null
+            tree = TreePane(this, store, ::openNote, ::onRemoved, ::moreMenu, ::onLessonCard)
             root.addView(tree, LinearLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
             root.addView(editor, LinearLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
             editor.visibility = View.GONE
         }
-        editor.onSaved = { scheduleSync() }
         frame = FrameLayout(this)
         frame.addView(root, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         setContentView(frame)
-        Updater.check(this)
+        quick = QuickSwitcher(this, vault, this) { currentFolder() }
+        updateCard()
 
         if (wide) {
-            val last = getPreferences(MODE_PRIVATE).getString("last", null)?.let { File(it) }
-            if (last != null && last.isFile) {
-                tree.dir = last.parentFile ?: store.root
-                openNote(last)
-            }
+            // Beim Start die Übersicht wie am PC; nur beim Umbau durch eine neue Fenstergröße die offene Notiz wieder zeigen
+            if (reopen != null && reopen.isFile) openNote(reopen) else showScreen(screen)
+        } else if (reopen != null && reopen.isFile) {
+            openNote(reopen)
         }
     }
 
@@ -238,16 +311,242 @@ class MainActivity : Activity() {
         editor.refreshInk(id)
     }
 
+    // ---- Notizen und Bildschirme öffnen ----
+
+    private fun rel(f: File) = f.relativeTo(store.root).path.replace(File.separatorChar, '/')
+
     private fun openNote(f: File) {
         editor.open(f)
-        tree.selected = f
-        tree.refresh()
         getPreferences(MODE_PRIVATE).edit().putString("last", f.path).apply()
-        if (!wide) {
-            tree.visibility = View.GONE
+        if (wide) {
+            val path = rel(f)
+            noteOpen = path
+            recents = Nav.pushRecent(recents, path)
+            saveList("recents", recents)
+            dash?.visibility = View.GONE
+            editor.visibility = View.VISIBLE
+            side?.apply {
+                current = path
+                this.recents = this@MainActivity.recents
+                reveal(path)
+                refresh()
+            }
+            updateNoteTools(path)
+            record('n', path)
+        } else {
+            tree?.selected = f
+            tree?.refresh()
+            tree?.visibility = View.GONE
             editor.visibility = View.VISIBLE
         }
     }
+
+    override fun openNote(path: String) = openNote(File(store.root, path))
+
+    /** Übersicht, Bereich, Inbox, Aufgaben oder Rückblick im Inhaltsbereich zeigen. */
+    private fun showScreen(s: Screen) {
+        if (!wide) return
+        editor.flush()
+        screen = s
+        noteOpen = null
+        dash?.visibility = View.VISIBLE
+        editor.visibility = View.GONE
+        dash?.show(s)
+        side?.apply {
+            current = null
+            screen = s
+            if (s is Screen.Area) reveal(s.path + "/x")
+            refresh()
+        }
+        record('a', encode(s))
+    }
+
+    override fun go(s: Screen) = showScreen(s)
+
+    private fun encode(s: Screen): String = when (s) {
+        Screen.Overview -> "ueberblick"
+        is Screen.Area -> "area:${s.path}"
+        Screen.Ideas -> "ideen"
+        Screen.Tasks -> "aufgaben"
+        Screen.Review -> "rueckblick"
+    }
+
+    private fun decode(code: String): Screen = when {
+        code.startsWith("area:") -> Screen.Area(code.removePrefix("area:"))
+        code == "ideen" -> Screen.Ideas
+        code == "aufgaben" -> Screen.Tasks
+        code == "rueckblick" -> Screen.Review
+        else -> Screen.Overview
+    }
+
+    // ---- Zurück/Vor ----
+
+    private fun record(kind: Char, p: String) {
+        if (navLock) return
+        if (hi in hist.indices && hist[hi] == (kind to p)) return
+        while (hist.size > hi + 1) hist.removeAt(hist.size - 1)
+        hist.add(kind to p)
+        if (hist.size > 50) hist.removeAt(0)
+        hi = hist.size - 1
+        side?.setHistory(hi > 0, hi < hist.size - 1)
+    }
+
+    private fun step(d: Int) {
+        val i = hi + d
+        if (i !in hist.indices) return
+        val (kind, p) = hist[i]
+        if (kind == 'n' && !File(store.root, p).isFile) {
+            hist.removeAt(i) // Notiz gibt es nicht mehr
+            if (d < 0) hi--
+            side?.setHistory(hi > 0, hi < hist.size - 1)
+            return step(d)
+        }
+        navLock = true
+        hi = i
+        try {
+            if (kind == 'n') openNote(File(store.root, p)) else showScreen(decode(p))
+        } finally {
+            navLock = false
+            side?.setHistory(hi > 0, hi < hist.size - 1)
+        }
+    }
+
+    override fun back() = step(-1)
+    override fun forward() = step(1)
+
+    // ---- Kopf der Notiz: Blättern, Anpinnen, Geschwister-Ordner ----
+
+    private fun buildNoteTools() {
+        prevBtn = Ui.iconButton(this, R.drawable.ic_chevron_left, "Vorherige Notiz im Ordner", true) { pagerTarget(false)?.let(::openNote) }
+        nextBtn = Ui.iconButton(this, R.drawable.ic_chevron_right, "Nächste Notiz im Ordner", true) { pagerTarget(true)?.let(::openNote) }
+        pinBtn = Ui.iconButton(this, R.drawable.ic_star, "Anpinnen", true) { togglePin() }
+        editor.tools.removeAllViews()
+        for (b in listOf(prevBtn, nextBtn, pinBtn)) {
+            editor.tools.addView(b, LinearLayout.LayoutParams(dp(40), dp(40)).apply { leftMargin = dp(6) })
+        }
+    }
+
+    private fun pagerTarget(next: Boolean): String? {
+        val p = noteOpen ?: return null
+        val pg = Nav.pager(vault.notes().map { it.path }, p)
+        return if (next) pg.next else pg.prev
+    }
+
+    private fun updateNoteTools(path: String) {
+        val pg = Nav.pager(vault.notes().map { it.path }, path)
+        prevBtn.alpha = if (pg.prev != null) 1f else 0.3f
+        nextBtn.alpha = if (pg.next != null) 1f else 0.3f
+        val pinned = path in pins
+        pinBtn.setImageResource(if (pinned) R.drawable.ic_star_fill else R.drawable.ic_star)
+        pinBtn.setColorFilter(if (pinned) Ui.ACCENT else Ui.TEXT2)
+        pinBtn.contentDescription = if (pinned) "Nicht mehr anpinnen" else "Anpinnen"
+    }
+
+    private fun togglePin() {
+        val p = noteOpen ?: return
+        pins = Nav.togglePin(pins, p).second
+        saveList("pins", pins)
+        side?.pins = pins
+        side?.refresh()
+        updateNoteTools(p)
+    }
+
+    /** Tippen auf den Pfad: Ordner auf derselben Ebene zum direkten Wechsel (wie das Dropdown am PC). */
+    private fun showPeers(path: String) {
+        val folder = Nav.dirOf(path)
+        if (folder.isEmpty()) return
+        val peers = Nav.folderPeers(vault.notes().map { it.path }, folder)
+        val items = peers.map { (if (it.current) "✓  " else "     ") + it.name + "   (${it.count})" }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Ordner in ${Nav.dirOf(folder).substringAfterLast('/').ifEmpty { "Notizen" }}")
+            .setItems(items) { _, which -> showScreen(Screen.Area(peers[which].path)) }
+            .show()
+    }
+
+    // ---- Schnellwechsel, Neu anlegen, Diktieren ----
+
+    override fun quick() {
+        editor.flush()
+        quick?.show()
+    }
+
+    private fun currentFolder(): String = noteOpen?.let(Nav::dirOf) ?: (screen as? Screen.Area)?.path ?: ""
+
+    override fun create(path: String) {
+        val f = File(store.root, path)
+        if (!f.exists()) {
+            store.write(f, "# ${f.nameWithoutExtension}\n\n")
+            scheduleSync(500)
+        }
+        refreshLists()
+        openNote(f)
+    }
+
+    private fun currentDir(): File = File(store.root, currentFolder())
+
+    override fun newNote() {
+        askText(this, "Neue Notiz", "") { name ->
+            val f = store.createNote(currentDir(), name)
+            if (f == null) toast("Name leer oder schon vergeben") else { refreshLists(); openNote(f); scheduleSync(500) }
+        }
+    }
+
+    override fun newFolder() {
+        askText(this, "Neuer Ordner", "") { name ->
+            if (store.createFolder(currentDir(), name) == null) toast("Name leer oder schon vergeben")
+            refreshLists()
+        }
+    }
+
+    override fun changed() {
+        scheduleSync(800)
+        side?.recents = recents
+        side?.refresh()
+    }
+
+    override fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+
+    /** Diktieren über die Spracherkennung des Geräts (kein Mikrofonzugriff der App selbst nötig). */
+    override fun dictate(onText: (String) -> Unit) {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.GERMANY.toLanguageTag())
+            .putExtra(RecognizerIntent.EXTRA_PROMPT, "Idee sprechen")
+        dictateCallback = onText
+        try {
+            @Suppress("DEPRECATION")
+            startActivityForResult(intent, REQ_DICTATE)
+        } catch (e: ActivityNotFoundException) {
+            dictateCallback = null
+            toast("Keine Spracherkennung auf diesem Gerät gefunden")
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        @Suppress("DEPRECATION")
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_DICTATE) {
+            val text = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+            if (resultCode == RESULT_OK && !text.isNullOrBlank()) dictateCallback?.invoke(text)
+            dictateCallback = null
+        }
+    }
+
+    /** Tastaturkürzel am Tablet mit Tastatur: Strg+K Schnellwechsel, Strg+N neue Notiz, Alt+←/→ Zurück/Vor. */
+    override fun dispatchKeyEvent(ev: KeyEvent): Boolean {
+        if (started && wide && ev.action == KeyEvent.ACTION_DOWN && inkScreen == null) {
+            when {
+                ev.isCtrlPressed && ev.keyCode == KeyEvent.KEYCODE_K -> { if (quick?.isShowing != true) quick(); return true }
+                ev.isCtrlPressed && ev.keyCode == KeyEvent.KEYCODE_N && quick?.isShowing != true -> { newNote(); return true }
+                ev.isAltPressed && ev.keyCode == KeyEvent.KEYCODE_DPAD_LEFT -> { back(); return true }
+                ev.isAltPressed && ev.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT -> { forward(); return true }
+            }
+        }
+        return super.dispatchKeyEvent(ev)
+    }
+
+    override fun more() = moreMenu()
 
     private fun moreMenu() {
         val items = ArrayList<String>()
@@ -272,15 +571,18 @@ class MainActivity : Activity() {
         editor.flush()
         if (!wide) {
             editor.visibility = View.GONE
-            tree.visibility = View.VISIBLE
+            tree?.visibility = View.VISIBLE
         }
     }
 
     private fun onRemoved(f: File) {
         editor.closeIfInside(f)
-        if (tree.selected?.path?.startsWith(f.path) == true) tree.selected = null
+        tree?.let { t -> if (t.selected?.path?.startsWith(f.path) == true) t.selected = null }
         if (!wide && editor.file == null) showTree()
+        if (wide && editor.file == null && noteOpen != null) showScreen(screen)
     }
+
+    override fun removed(f: File) = onRemoved(f)
 
     override fun onPause() {
         handler.removeCallbacks(ticker)
@@ -298,11 +600,23 @@ class MainActivity : Activity() {
         } else if (!started) {
             @Suppress("DEPRECATION")
             super.onBackPressed()
-        } else if (!wide && editor.visibility == View.VISIBLE) {
+        } else if (wide) {
+            when {
+                noteOpen != null -> showScreen(screen)
+                hi > 0 -> back()
+                else -> @Suppress("DEPRECATION") super.onBackPressed()
+            }
+        } else if (editor.visibility == View.VISIBLE) {
             showTree()
-        } else if (!tree.goUp()) {
+        } else if (tree?.goUp() != true) {
             @Suppress("DEPRECATION")
             super.onBackPressed()
         }
+    }
+
+    companion object {
+        /** Ab dieser Fensterbreite (dp) gilt das Tablet-Layout mit Seitenleiste. */
+        const val WIDE_DP = 600
+        private const val REQ_DICTATE = 41
     }
 }
