@@ -13,13 +13,14 @@ import gi
 
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from . import config as cfgmod  # noqa: E402
 from . import dash  # noqa: E402
+from . import nav  # noqa: E402
 from .sync import AuthError, Client, ServerError, Syncer, sha256  # noqa: E402
 
-APP_ID = 'online.minihomelab.NotizenLinux'
+APP_ID = os.environ.get('NOTIZEN_APP_ID', 'online.minihomelab.NotizenLinux')  # Tests nehmen eine eigene ID, damit sie nicht an eine laufende Instanz weiterleiten
 
 # Farben und Maße wie in Slotwise: sachlich, ein Blau-Akzent, feine Linien statt Schatten.
 CSS = """
@@ -38,6 +39,11 @@ window, textview { font-family: "IBM Plex Sans", "Cantarell", sans-serif; }
 .lv3 { background: mix(@card_bg_color, @accent_bg_color, .80); }
 .lv4 { background: @accent_bg_color; }
 .fmt button { min-width: 36px; min-height: 32px; }
+.kbd { font-family: "IBM Plex Mono", monospace; font-size: 11px; padding: 1px 6px; border-radius: 4px; border: 1px solid alpha(@window_fg_color, .25); opacity: .8; }
+.sec-label { font-size: 11px; letter-spacing: 1px; opacity: .65; margin: 10px 14px 2px; }
+.side-row { padding: 4px 8px; min-height: 32px; }
+.qs-row { padding: 8px 12px; }
+.qs-hit { font-weight: 700; color: @accent_color; }
 .checkbox-empty { min-width: 14px; min-height: 14px; border-radius: 4px; border: 1.5px solid alpha(@window_fg_color, .4); }
 """
 
@@ -177,6 +183,11 @@ class MainWindow(Adw.ApplicationWindow):
         self.open_folders: set[str] = set()
         self._save_timer = self._sync_timer = 0
         self.query = ''
+        saved = cfgmod.load_nav()
+        self.pins, self.recents = saved['pins'], saved['recents']  # nur auf diesem PC
+        self.hist: list[tuple[str, str]] = []  # Zurück/Vor: ('n', Notiz) oder ('a', Bereich)
+        self.hi, self._nav_lock, self._pin_lock = -1, False, False
+        self._text_cache: dict[str, tuple[float, str]] = {}
         self._build()
         self.worker = Worker(self.syncer, self.on_report, self.on_status)
         self.worker.start()
@@ -204,6 +215,9 @@ class MainWindow(Adw.ApplicationWindow):
         self._action('sync', self.request_sync, '<Control>r')
         self._action('settings', self.open_settings)
         self._action('delete', self.delete_note)
+        self._action('quick', self.open_quick, '<Control>k')
+        self._action('back', lambda: self.step_hist(-1), '<Alt>Left')
+        self._action('forward', lambda: self.step_hist(1), '<Alt>Right')
 
         self.toasts = Adw.ToastOverlay()
         split = Adw.NavigationSplitView(min_sidebar_width=250, max_sidebar_width=320)
@@ -219,6 +233,12 @@ class MainWindow(Adw.ApplicationWindow):
         add = Gtk.Button(icon_name='list-add-symbolic', tooltip_text='Neue Notiz (Strg+N)')
         add.set_action_name('win.new')
         hb.pack_start(add)
+        self.back_btn = Gtk.Button(icon_name='go-previous-symbolic', tooltip_text='Zurück (Alt+←)', sensitive=False)
+        self.back_btn.set_action_name('win.back')
+        self.fwd_btn = Gtk.Button(icon_name='go-next-symbolic', tooltip_text='Vor (Alt+→)', sensitive=False)
+        self.fwd_btn.set_action_name('win.forward')
+        hb.pack_start(self.back_btn)
+        hb.pack_start(self.fwd_btn)
         menu = Gio.Menu()
         menu.append('Jetzt abgleichen', 'win.sync')
         menu.append('Verbindung …', 'win.settings')
@@ -240,13 +260,30 @@ class MainWindow(Adw.ApplicationWindow):
         self.nav.connect('row-activated', lambda _l, r: self.show_area(r.area))
         box.append(self.nav)
 
-        self.search = Gtk.SearchEntry(placeholder_text='Titel suchen', margin_start=12, margin_end=12, margin_top=6, margin_bottom=6)
-        self.search.connect('search-changed', self._on_search)
-        box.append(self.search)
+        qs = Gtk.Button(margin_start=12, margin_end=12, margin_top=6, margin_bottom=2)
+        qsbox = Gtk.Box(spacing=8)
+        qsbox.append(Gtk.Image(icon_name='system-search-symbolic'))
+        qsbox.append(Gtk.Label(label='Suchen oder springen', xalign=0, hexpand=True))
+        qsbox.append(label('Strg K', ['kbd']))
+        qs.set_child(qsbox)
+        qs.set_action_name('win.quick')
+        box.append(qs)
+
+        self.pins_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.recents_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.append(self.pins_box)
+        box.append(self.recents_box)
+        box.append(label('ORDNER', ['sec-label']))
 
         self.store = None
         self.tree = Gtk.TreeView(headers_visible=False, enable_search=False, activate_on_single_click=True)
-        col = Gtk.TreeViewColumn('Name', Gtk.CellRendererText(ellipsize=3), text=0)
+        col = Gtk.TreeViewColumn('Name')
+        name_cell = Gtk.CellRendererText(ellipsize=3)
+        count_cell = Gtk.CellRendererText(xalign=1.0, foreground='#888888', scale=0.85)
+        col.pack_start(name_cell, True)
+        col.pack_start(count_cell, False)
+        col.add_attribute(name_cell, 'text', 0)
+        col.add_attribute(count_cell, 'text', 3)
         self.tree.append_column(col)
         self.tree.get_selection().connect('changed', self._on_tree_selection)
         self.tree.connect('row-expanded', lambda _t, it, path: self._remember(it, True))
@@ -268,10 +305,22 @@ class MainWindow(Adw.ApplicationWindow):
         tv = Adw.ToolbarView()
         hb = Adw.HeaderBar()
         self.title = Adw.WindowTitle(title='Übersicht', subtitle='')
-        hb.set_title_widget(self.title)
+        self.crumb_box = Gtk.Box(spacing=2, halign=Gtk.Align.CENTER)
+        self.title_stack = Gtk.Stack()
+        self.title_stack.add_named(self.title, 'title')
+        self.title_stack.add_named(self.crumb_box, 'crumb')
+        hb.set_title_widget(self.title_stack)
         self.del_btn = Gtk.Button(icon_name='user-trash-symbolic', tooltip_text='Notiz löschen', visible=False)
         self.del_btn.set_action_name('win.delete')
-        hb.pack_end(self.del_btn)
+        self.pin_btn = Gtk.ToggleButton(icon_name='non-starred-symbolic', tooltip_text='Anpinnen', visible=False)
+        self.pin_btn.connect('toggled', self._on_pin)
+        self.next_btn = Gtk.Button(icon_name='go-next-symbolic', visible=False)
+        self.next_btn.connect('clicked', lambda *_: self._page(self._pg_next))
+        self.prev_btn = Gtk.Button(icon_name='go-previous-symbolic', visible=False)
+        self.prev_btn.connect('clicked', lambda *_: self._page(self._pg_prev))
+        self._pg_prev = self._pg_next = None
+        for b in (self.del_btn, self.pin_btn, self.next_btn, self.prev_btn):
+            hb.pack_end(b)
         tv.add_top_bar(hb)
 
         self.stack = Gtk.Stack()
@@ -336,49 +385,64 @@ class MainWindow(Adw.ApplicationWindow):
     def show_area(self, area: str):
         self.flush_save()
         self.area, self.current = area, None
-        self.del_btn.set_visible(False)
+        self._tools_visible(False)
+        self.title_stack.set_visible_child_name('title')
         self.title.set_title(area.split('/')[-1] if area else 'Übersicht')
         self.title.set_subtitle(area + '/' if area else datetime.now().strftime('%A, %d. %B').upper())
         self._select_nav(area)
+        if self._reveal(area + '/x' if area else ''):
+            GLib.idle_add(self._idle_tree)  # nicht mitten im Auswahl-Signal des Baums neu aufbauen
+        self._render_side()
         self.build_dash()
         self.stack.set_visible_child_name('dash')
+        self._record('a', area)
+
+    def _tools_visible(self, v: bool):
+        for b in (self.del_btn, self.pin_btn, self.next_btn, self.prev_btn):
+            b.set_visible(v)
+
+    def _reveal(self, rel: str) -> bool:
+        """Klappt alle Ordner über `rel` im Baum auf; wahr, wenn sich etwas geändert hat."""
+        before = len(self.open_folders)
+        for d in nav.crumbs(rel) if rel else []:
+            self.open_folders.add(d['path'])
+        return len(self.open_folders) != before
+
+    def _idle_tree(self):
+        self.refresh_tree()
+        return GLib.SOURCE_REMOVE
 
     # ---------- Baum ----------
 
     def refresh_tree(self):
         notes = dash.scan(self.root)
-        q = self.query.strip().lower()
-        store = Gtk.TreeStore(str, str, bool)
+        counts = nav.folder_counts([n.path for n in notes])
+        store = Gtk.TreeStore(str, str, bool, str)
         nodes = {}
         key = lambda n: [(0 if i < len(p) - 1 else 1, seg.lower()) for p in [n.path.split('/')] for i, seg in enumerate(p)]
         for n in sorted(notes, key=key):
-            if q and q not in n.path.lower():
-                continue
             parts = n.path.split('/')
             parent, acc = None, ''
             for seg in parts[:-1]:
                 acc = f'{acc}/{seg}' if acc else seg
                 if acc not in nodes:
-                    nodes[acc] = store.append(parent, [seg, acc, True])
+                    nodes[acc] = store.append(parent, [seg, acc, True, str(counts[acc])])
                 parent = nodes[acc]
-            store.append(parent, [parts[-1].removesuffix('.md'), n.path, False])
+            store.append(parent, [parts[-1].removesuffix('.md'), n.path, False, dash.when(n.mtime)])
         self._tree_lock = True
         self.tree.set_model(store)
         self.store = store
         for acc, it in nodes.items():
-            if q or acc in self.open_folders:
+            if acc in self.open_folders:
                 self.tree.expand_row(store.get_path(it), False)
         self._tree_lock = False
+        self._render_side()
 
     def _remember(self, it, opened):
         if getattr(self, '_tree_lock', False):
             return
         path = self.store.get_value(it, 1)
         (self.open_folders.add if opened else self.open_folders.discard)(path)
-
-    def _on_search(self, entry):
-        self.query = entry.get_text()
-        self.refresh_tree()
 
     def _on_tree_selection(self, sel):
         if getattr(self, '_tree_lock', False):
@@ -507,10 +571,197 @@ class MainWindow(Adw.ApplicationWindow):
         parts = rel.removesuffix('.md').split('/')
         self.title.set_title(parts[-1])
         self.title.set_subtitle(' › '.join(parts[:-1]))
-        self.del_btn.set_visible(True)
+        self._tools_visible(True)
         self._select_nav(parts[0] if len(parts) > 1 else '')
+        self.recents = nav.push_recent(self.recents, rel)
+        self._save_nav()
+        if self._reveal(rel):
+            GLib.idle_add(self._idle_tree)  # nicht mitten im Auswahl-Signal des Baums neu aufbauen
+        self._render_side()
+        self._render_note_nav(rel)
+        self.title_stack.set_visible_child_name('crumb')
         self.stack.set_visible_child_name('note')
         self.text.grab_focus()
+        self._record('n', rel)
+
+    # ---------- Pfad, Blättern, Pins, Verlauf ----------
+
+    def _all_paths(self):
+        return [n.path for n in dash.scan(self.root)]
+
+    def _render_note_nav(self, rel: str):
+        while (c := self.crumb_box.get_first_child()):
+            self.crumb_box.remove(c)
+        paths = self._all_paths()
+        cs = nav.crumbs(rel)
+        for i, c in enumerate(cs):
+            if i == len(cs) - 1:
+                self.crumb_box.append(self._folder_menu(c['path'], c['label'], paths))
+            else:
+                b = Gtk.Button(label=c['label'])
+                b.add_css_class('flat')
+                b.connect('clicked', lambda _b, p=c['path']: self.show_area(p))
+                self.crumb_box.append(b)
+            self.crumb_box.append(label('›', ['dim-label']))
+        self.crumb_box.append(label(nav.title_of(rel), ['heading']))
+        pg = nav.pager(paths, rel)
+        self._pg_prev, self._pg_next = pg['prev'], pg['next']
+        for btn, target, what in ((self.prev_btn, pg['prev'], 'Vorherige'), (self.next_btn, pg['next'], 'Nächste')):
+            btn.set_sensitive(bool(target))
+            btn.set_tooltip_text(f'{what} Notiz im Ordner: {nav.title_of(target)}' if target else f'{what} Notiz im Ordner')
+        self.title_stack.set_tooltip_text(f'{pg["index"] + 1} von {pg["total"]} in {pg["folder"].split("/")[-1] or "Notizen"}')
+        self._pin_lock = True
+        pinned = rel in self.pins
+        self.pin_btn.set_active(pinned)
+        self.pin_btn.set_icon_name('starred-symbolic' if pinned else 'non-starred-symbolic')
+        self.pin_btn.set_tooltip_text('Nicht mehr anpinnen' if pinned else 'Anpinnen')
+        self._pin_lock = False
+
+    def _folder_menu(self, folder: str, name: str, paths):
+        """Letzter Ordner im Pfad: Klick zeigt die Geschwister-Ordner zum direkten Wechsel."""
+        pop = Gtk.Popover()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        parent = nav.dir_of(folder)
+        box.append(label(f'ORDNER IN {parent.split("/")[-1].upper() or "NOTIZEN"}', ['sec-label']))
+        for f in nav.folder_peers(paths, folder):
+            row = Gtk.Button()
+            row.add_css_class('flat')
+            rb = Gtk.Box(spacing=8)
+            rb.append(Gtk.Label(label='✓' if f['current'] else ' ', width_chars=2))
+            rb.append(Gtk.Label(label=f['name'], xalign=0, hexpand=True))
+            rb.append(label(str(f['count']), ['kbd']))
+            row.set_child(rb)
+            row.connect('clicked', lambda _b, p=f['path']: (pop.popdown(), self.show_area(p)))
+            box.append(row)
+        pop.set_child(box)
+        mb = Gtk.MenuButton(label=f'{name} ▾', popover=pop)
+        mb.add_css_class('flat')
+        return mb
+
+    def _page(self, target):
+        if target:
+            self.open_note(target)
+
+    def _on_pin(self, btn):
+        if self._pin_lock or not self.current:
+            return
+        _pinned, self.pins = nav.toggle_pin(self.pins, self.current)
+        self._save_nav()
+        self._pin_lock = True
+        pinned = self.current in self.pins
+        btn.set_icon_name('starred-symbolic' if pinned else 'non-starred-symbolic')
+        btn.set_tooltip_text('Nicht mehr anpinnen' if pinned else 'Anpinnen')
+        self._pin_lock = False
+        self._render_side()
+
+    def _save_nav(self):
+        try:
+            cfgmod.save_nav({'pins': self.pins, 'recents': self.recents})
+        except OSError:
+            pass  # Pins und Verlauf sind Komfort, kein Grund für einen Fehler
+
+    def _render_side(self):
+        exists = lambda p: (self.root / p).is_file()  # noqa: E731
+        self.pins = nav.prune(self.pins, exists)
+        self.recents = nav.prune(self.recents, exists)
+        for box, title, items in ((self.pins_box, 'ANGEPINNT', self.pins), (self.recents_box, 'ZULETZT GEÖFFNET', [p for p in self.recents if p not in self.pins][:4])):
+            while (c := box.get_first_child()):
+                box.remove(c)
+            if not items:
+                continue
+            box.append(label(title, ['sec-label']))
+            for p in items:
+                b = Gtk.Button(margin_start=8, margin_end=8)
+                b.add_css_class('flat')
+                row = Gtk.Box(spacing=8)
+                row.append(Gtk.Image(icon_name='starred-symbolic' if title == 'ANGEPINNT' else 'document-open-recent-symbolic'))
+                row.append(Gtk.Label(label=nav.title_of(p), xalign=0, hexpand=True, ellipsize=3))
+                row.append(label(nav.dir_of(p).split('/')[-1], ['dim-label', 'caption']))
+                b.set_child(row)
+                if p == self.current:
+                    b.add_css_class('suggested-action')
+                b.connect('clicked', lambda _b, q=p: self.open_note(q))
+                box.append(b)
+
+    def _update_hist(self):
+        self.back_btn.set_sensitive(self.hi > 0)
+        self.fwd_btn.set_sensitive(self.hi < len(self.hist) - 1)
+
+    def _record(self, kind: str, p: str):
+        if self._nav_lock:
+            return
+        if 0 <= self.hi < len(self.hist) and self.hist[self.hi] == (kind, p):
+            return
+        del self.hist[self.hi + 1:]
+        self.hist.append((kind, p))
+        self.hist = self.hist[-50:]
+        self.hi = len(self.hist) - 1
+        self._update_hist()
+
+    def step_hist(self, d: int):
+        i = self.hi + d
+        if not 0 <= i < len(self.hist):
+            return
+        kind, p = self.hist[i]
+        if kind == 'n' and not (self.root / p).is_file():
+            del self.hist[i]  # Notiz gibt es nicht mehr
+            if d < 0:
+                self.hi -= 1
+            self._update_hist()
+            return self.step_hist(d)
+        self._nav_lock, self.hi = True, i
+        try:
+            self.open_note(p) if kind == 'n' else self.show_area(p)
+        finally:
+            self._nav_lock = False
+            self._update_hist()
+
+    # ---------- Schnellwechsel (Strg+K) ----------
+
+    def _text_of(self, p: str):
+        try:
+            mt = (self.root / p).stat().st_mtime
+            hit = self._text_cache.get(p)
+            if hit and hit[0] == mt:
+                return hit[1]
+            text = (self.root / p).read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            return ''
+        self._text_cache[p] = (mt, text)
+        return text
+
+    def qs_items(self, query: str, scope: str = '') -> list[dict]:
+        """Treffer für den Schnellwechsel; als letzter Eintrag die Aktion „Neue Notiz“, wenn etwas eingegeben ist."""
+        notes = dash.scan(self.root)
+        mt = {n.path: n.mtime for n in notes}
+        items = nav.search(list(mt), lambda p: mt[p], self._text_of, query, scope)
+        raw = query.strip()
+        if raw and not raw.startswith('/'):
+            base = scope or (nav.dir_of(self.current) if self.current else self.area)
+            rel = clean_path(raw).removesuffix('.md')
+            if rel:
+                items.append({'kind': 'create', 'title': raw, 'path': (rel if '/' in raw or not base else f'{base}/{rel}') + '.md'})
+        return items
+
+    def run_item(self, it: dict):
+        if it['kind'] == 'folder':
+            self.show_area(it['path'])
+        elif it['kind'] == 'create':
+            self.create_note(it['path'])
+        else:
+            self.open_note(it['path'])
+
+    def open_quick(self):
+        QuickSwitcher(self).present(self)
+
+    def create_note(self, rel: str):
+        p = self.root / rel
+        if not p.exists():
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f'# {rel.removesuffix(".md").split("/")[-1]}\n\n', encoding='utf-8')
+            self.request_sync(delay=500)
+        self.refresh_tree()
+        self.open_note(rel)
 
     def _on_changed(self, _b):
         if self._loading:
@@ -657,15 +908,7 @@ class MainWindow(Adw.ApplicationWindow):
             rel = clean_path(entry.get_text())
             if not rel:
                 return
-            rel = rel.removesuffix('.md') + '.md'
-            p = self.root / rel
-            if not p.exists():
-                p.parent.mkdir(parents=True, exist_ok=True)
-                title = rel.removesuffix('.md').split('/')[-1]
-                p.write_text(f'# {title}\n\n', encoding='utf-8')
-                self.request_sync(delay=500)
-            self.refresh_tree()
-            self.open_note(rel)
+            self.create_note(rel.removesuffix('.md') + '.md')
 
         self._ask('Neue Notiz', 'Ordner und Titel, getrennt mit /. Fehlende Ordner werden angelegt.', 'Anlegen', create, entry)
 
@@ -745,6 +988,160 @@ class MainWindow(Adw.ApplicationWindow):
         self.worker.stop.set()
         self.worker.request()
         return False
+
+
+class QuickSwitcher(Adw.Dialog):
+    """Strg+K: Notizen, Ordner und Aktionen suchen. ↑↓ wählen, ↵ öffnen, Strg+↵ neu anlegen, Tab wechselt den Bereich, „/“ sucht Ordner."""
+
+    SCOPES = ['', 'Schule', 'Projekte', 'Alltag']
+
+    def __init__(self, win: MainWindow):
+        super().__init__(title='Schnellwechsel', content_width=680, content_height=520)
+        self.win, self.scope, self.items, self.rows, self.sel = win, '', [], [], 0
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.entry = Gtk.Entry(placeholder_text='Notiz, Ordner oder neue Notiz', margin_start=14, margin_end=14, margin_top=14, margin_bottom=8, primary_icon_name='system-search-symbolic')
+        self.entry.connect('changed', lambda *_: self._changed())
+        keys = Gtk.EventControllerKey()
+        keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        keys.connect('key-pressed', self._key)
+        self.entry.add_controller(keys)
+        box.append(self.entry)
+
+        chips = Gtk.Box(spacing=6, margin_start=14, margin_end=14, margin_bottom=8)
+        self.chips = []
+        group = None
+        for s in self.SCOPES:
+            b = Gtk.ToggleButton(label=s or 'Alle', group=group)
+            group = group or b
+            b.scope = s
+            b.add_css_class('pill')
+            b.connect('toggled', self._chip)
+            chips.append(b)
+            self.chips.append(b)
+        self.chips[0].set_active(True)
+        chips.append(Gtk.Box(hexpand=True))
+        chips.append(label('Tab wechselt den Bereich', ['caption', 'dim-label']))
+        box.append(chips)
+        box.append(Gtk.Separator())
+
+        self.list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
+        self.list.add_css_class('navigation-sidebar')
+        self.list.connect('row-activated', lambda _l, r: self._run(r.idx))
+        self.sc = Gtk.ScrolledWindow(vexpand=True, child=self.list, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        box.append(self.sc)
+        box.append(Gtk.Separator())
+        foot = Gtk.Box(spacing=14, margin_start=14, margin_end=14, margin_top=8, margin_bottom=8)
+        for k, t in (('↑↓', 'wählen'), ('↵', 'öffnen'), ('/', 'nur Ordner'), ('Strg ↵', 'neu anlegen')):
+            f = Gtk.Box(spacing=5)
+            f.append(label(k, ['kbd']))
+            f.append(label(t, ['caption', 'dim-label']))
+            foot.append(f)
+        foot.append(Gtk.Box(hexpand=True))
+        foot.append(label('Titel, Pfad und Text', ['caption', 'dim-label']))
+        box.append(foot)
+        self.set_child(box)
+        self.set_focus(self.entry)
+        self.refresh()
+
+    def _chip(self, b):
+        if b.get_active() and b.scope != self.scope:
+            self.scope = b.scope
+            self.sel = 0
+            self.refresh()
+            self.entry.grab_focus()
+
+    def _changed(self):
+        self.sel = 0
+        self.refresh()
+
+    def refresh(self):
+        q = self.entry.get_text()
+        self.items = self.win.qs_items(q, self.scope)
+        while (c := self.list.get_first_child()):
+            self.list.remove(c)
+        self.rows = []
+        last = ''
+        for i, it in enumerate(self.items):
+            group = 'AKTIONEN' if it['kind'] == 'create' else 'ORDNER' if it['kind'] == 'folder' else 'NOTIZEN' if q.strip() else 'ZULETZT GEÄNDERT'
+            if group != last:
+                head = Gtk.ListBoxRow(selectable=False, activatable=False)
+                head.set_child(label(group, ['sec-label']))
+                self.list.append(head)
+                last = group
+            row = Gtk.ListBoxRow()
+            row.idx = i
+            row.add_css_class('qs-row')
+            row.set_child(self._row(it))
+            self.list.append(row)
+            self.rows.append(row)
+        if not self.items:
+            self.list.append(Gtk.ListBoxRow(selectable=False, activatable=False, child=label('Nichts gefunden.', ['dim-label'])))
+        self._select(self.sel, scroll=False)
+
+    def _row(self, it):
+        b = Gtk.Box(spacing=12)
+        ico = '+' if it['kind'] == 'create' else '▸' if it['kind'] == 'folder' else '·'
+        b.append(label(ico, ['heading']))
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+        if it['kind'] == 'create':
+            t = Gtk.Label(xalign=0, ellipsize=3)
+            t.set_markup(f'Neue Notiz „{esc(it["title"])}“ anlegen')
+        else:
+            t = Gtk.Label(xalign=0, ellipsize=3)
+            p = it.get('parts')
+            t.set_markup(f'{esc(p[0])}<span weight="bold" underline="single">{esc(p[1])}</span>{esc(p[2])}' if p else esc(it['title']))
+        col.append(t)
+        col.append(label(it['path'], ['mono', 'caption', 'dim-label'], ellipsize=True))
+        b.append(col)
+        if it.get('via') == 'text':
+            b.append(label('im Text', ['caption', 'dim-label']))
+        if it['kind'] == 'create':
+            b.append(label('Strg ↵', ['kbd']))
+        else:
+            if it.get('area'):
+                b.append(label(it['area'], ['caption', 'dim-label']))
+            b.append(label(f'{it["count"]} Notizen' if it['kind'] == 'folder' else dash.when(it['mtime']), ['when']))
+        return b
+
+    def _select(self, i: int, scroll=True):
+        if not self.rows:
+            return
+        self.sel = max(0, min(i, len(self.rows) - 1))
+        row = self.rows[self.sel]
+        self.list.select_row(row)
+        if scroll:
+            adj = self.sc.get_vadjustment()
+            a = row.get_allocation()
+            if a.y < adj.get_value():
+                adj.set_value(a.y)
+            elif a.y + a.height > adj.get_value() + adj.get_page_size():
+                adj.set_value(a.y + a.height - adj.get_page_size())
+
+    def _key(self, _c, keyval, _code, state):
+        ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        if keyval in (Gdk.KEY_Down, Gdk.KEY_Up):
+            self._select(self.sel + (1 if keyval == Gdk.KEY_Down else -1))
+            return True
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            if ctrl:
+                create = [i for i, it in enumerate(self.items) if it['kind'] == 'create']
+                if create:
+                    self._run(create[0])
+            else:
+                self._run(self.sel)
+            return True
+        if keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab):
+            step = -1 if keyval == Gdk.KEY_ISO_Left_Tab else 1
+            self.chips[(self.SCOPES.index(self.scope) + step) % len(self.SCOPES)].set_active(True)
+            return True
+        return False
+
+    def _run(self, i: int):
+        if not 0 <= i < len(self.items):
+            return
+        it = self.items[i]
+        self.close()
+        GLib.idle_add(lambda: (self.win.run_item(it), GLib.SOURCE_REMOVE)[1])
 
 
 class App(Adw.Application):

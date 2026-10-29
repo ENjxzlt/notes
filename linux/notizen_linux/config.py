@@ -41,6 +41,25 @@ def save(cfg: Config) -> None:
     os.replace(tmp, CONFIG_FILE)
 
 
+NAV_FILE = DATA_DIR / 'nav.json'
+
+
+def load_nav() -> dict:
+    """Angepinnte und zuletzt geöffnete Notizen (nur auf diesem PC)."""
+    try:
+        raw = json.loads(NAV_FILE.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        raw = {}
+    return {k: [p for p in raw.get(k, []) if isinstance(p, str)] for k in ('pins', 'recents')}
+
+
+def save_nav(state: dict) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = NAV_FILE.with_suffix('.tmp')
+    tmp.write_text(json.dumps(state, ensure_ascii=False), encoding='utf-8')
+    os.replace(tmp, NAV_FILE)
+
+
 def normalize_server(url: str) -> str:
     url = url.strip().rstrip('/')
     if url and '://' not in url:

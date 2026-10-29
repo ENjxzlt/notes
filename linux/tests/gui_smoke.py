@@ -12,6 +12,7 @@ from pathlib import Path
 tmp = Path(tempfile.mkdtemp(prefix='notizen-gui-'))
 os.environ['XDG_CONFIG_HOME'] = str(tmp / 'cfg')
 os.environ['XDG_DATA_HOME'] = str(tmp / 'data')
+os.environ['NOTIZEN_APP_ID'] = 'online.minihomelab.NotizenLinuxTest'
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from notizen_linux import config  # noqa: E402
@@ -33,6 +34,12 @@ def check(name, ok, extra=''):
     results.append(ok)
     print(('OK   ' if ok else 'FEHLT'), name, extra)
 
+
+for rel, body in (('Schule/Physik/Elektrisches Feld.md', '# Elektrisches Feld\n'), ('Schule/Physik/Magnetismus.md', '# Magnetismus\n'), ('Schule/Mathe/Ableitung.md', '# Ableitung\n\n- [ ] Übungsblatt\n'), ('Projekte/Notizen-App.md', '# Notizen-App\n'), ('Alltag/Einkauf.md', '# Einkauf\n')):
+    try:
+        client.put(rel, body.encode(), 0)
+    except Exception:  # noqa: BLE001  (gibt es schon: gut)
+        pass
 
 app = App()
 steps = []
@@ -97,11 +104,39 @@ def s4():
     kopie = [n for n in names if 'Konflikt' in n]
     check('Ungesicherte Eingabe bleibt als Konfliktkopie erhalten', bool(kopie) and 'MEINE UNGESICHERTE ZEILE' in (w.root / 'Schule/Mathe' / kopie[0]).read_text(encoding='utf-8'), str(names))
     check('Offene Notiz zeigt die Serverfassung', 'zweite fremde' in w._text())
-    w.new_note  # Dialoge werden hier nicht geöffnet
     w.show_area('Schule')
     check('Bereichsseite baut sich auf', w.title.get_title() == 'Schule')
     w.show_area('')
     check('Übersicht baut sich auf', w.title.get_title() == 'Übersicht')
+
+
+PHYS = 'Schule/Physik/Elektrisches Feld.md'
+
+
+@step(16000)
+def s5():
+    w = app.win
+    items = w.qs_items('elek', '')
+    check('Schnellwechsel findet nach Titel zuerst', items[0]['title'] == 'Elektrisches Feld' and items[0]['parts'] == ('', 'Elek', 'trisches Feld'), str([i['title'] for i in items]))
+    check('… und bietet „Neue Notiz“ an', items[-1]['kind'] == 'create' and items[-1]['path'] == 'elek.md', items[-1]['path'])
+    check('Ordnersuche mit „/“', [i['path'] for i in w.qs_items('/phy')] == ['Schule/Physik'])
+    check('Bereichsfilter', all(i['area'] == 'Projekte' for i in w.qs_items('', 'Projekte') if i['kind'] == 'note'))
+    w.open_note(PHYS)
+    check('Pfad zeigt Ordner und Titel', w.title_stack.get_visible_child_name() == 'crumb')
+    check('Blättern: nächste Notiz im Ordner', w._pg_next == 'Schule/Physik/Magnetismus.md' and w._pg_prev is None, str((w._pg_prev, w._pg_next)))
+    w.pin_btn.set_active(True)
+    check('Pin wird gemerkt', PHYS in w.pins)
+    w._page(w._pg_next)
+    check('Weiterblättern öffnet die Nachbarnotiz', w.current == 'Schule/Physik/Magnetismus.md')
+    w.step_hist(-1)
+    check('Zurück springt zur vorigen Notiz', w.current == PHYS, str(w.current))
+    w.step_hist(1)
+    check('Vor springt wieder zur nächsten', w.current == 'Schule/Physik/Magnetismus.md')
+    check('Verlauf merkt die Notizen', w.recents[:2] == ['Schule/Physik/Magnetismus.md', PHYS], str(w.recents))
+    saved = config.load_nav()
+    check('Pins und Verlauf liegen auf der Platte', PHYS in saved['pins'] and PHYS in saved['recents'])
+    w.run_item({'kind': 'create', 'title': 'Schnell', 'path': 'Schule/Physik/Schnell.md'})
+    check('Neue Notiz aus dem Schnellwechsel', w.current == 'Schule/Physik/Schnell.md' and (w.root / 'Schule/Physik/Schnell.md').read_text() == '# Schnell\n\n')
     app.quit()
 
 
