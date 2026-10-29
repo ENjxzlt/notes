@@ -137,6 +137,40 @@ def s5():
     check('Pins und Verlauf liegen auf der Platte', PHYS in saved['pins'] and PHYS in saved['recents'])
     w.run_item({'kind': 'create', 'title': 'Schnell', 'path': 'Schule/Physik/Schnell.md'})
     check('Neue Notiz aus dem Schnellwechsel', w.current == 'Schule/Physik/Schnell.md' and (w.root / 'Schule/Physik/Schnell.md').read_text() == '# Schnell\n\n')
+
+
+@step(19000)
+def s6():
+    from notizen_linux import ideas_ui, inbox
+    w = app.win
+    w.show_area('')
+    inbox.add_idea(w.root, 'GlutTube: Wiedergabelisten nach Stimmung')
+    inbox.add_idea(w.root, 'Physik: Kondensator-Versuch wiederholen')
+    w.after_ideas_change()
+    check('Ideen liegen in der Inbox', len(inbox.ideas(w.root)) == 2)
+    check('Inbox-Notiz taucht nicht im Baum auf', 'Inbox' not in [n.title for n in __import__('notizen_linux.dash', fromlist=['scan']).scan(w.root)])
+    rows = {}
+    i = 0
+    while (r := w.nav.get_row_at_index(i)) is not None:
+        rows[r.area] = r
+        i += 1
+    check('Zähler der Inbox in der Seitenleiste', rows['!ideen'].count.get_text() == '2' and rows['!ideen'].count.get_visible())
+    w.show_area('!ideen')
+    check('Inbox-Seite baut sich auf', w.title.get_title() == 'Inbox')
+    first = inbox.ideas(w.root)[0]
+    inbox.add_task(w.root, 'Schule', first.text, 45, inbox.parse_due('Freitag'))
+    inbox.drop_idea(w.root, first.raw)
+    w.after_ideas_change()
+    check('Aufgabe angelegt, Idee aus der Inbox entfernt', len(inbox.ideas(w.root)) == 1 and ideas_ui.counts(w)[1] >= 1)
+    w.show_area('!aufgaben')
+    check('Aufgaben-Seite baut sich auf', w.title.get_title() == 'Aufgaben')
+    t = [x for x in inbox.all_tasks(w.root, [n.path for n in __import__('notizen_linux.dash', fromlist=['scan']).scan(w.root)]) if x.path == 'Schule/Aufgaben.md'][0]
+    check('Aufgabe trägt Dauer und Frist', t.minutes == 45 and t.due is not None, f'{t.title} {t.minutes} {t.due}')
+    check('Abhaken schreibt in die Notiz', inbox.tick_task(w.root, t) and '- [x]' in (w.root / 'Schule/Aufgaben.md').read_text(encoding='utf-8'))
+    w.show_area('!rueckblick')
+    check('Rückblick baut sich auf', w.title.get_title() == 'Rückblick')
+    w.show_area('')
+    check('Zurück in der Übersicht', w.title.get_title() == 'Übersicht')
     app.quit()
 
 

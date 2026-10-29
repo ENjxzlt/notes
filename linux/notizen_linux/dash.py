@@ -27,8 +27,8 @@ def scan(root: Path) -> list[Note]:
     out = []
     for p in Path(root).rglob('*.md'):
         rel = p.relative_to(root).as_posix()
-        if any(seg.startswith('.') for seg in rel.split('/')) or p.name.endswith('.tmp'):
-            continue
+        if any(seg.startswith('.') for seg in rel.split('/')) or p.name.endswith('.tmp') or rel == 'Inbox.md':
+            continue  # die Inbox hat ihre eigene Ansicht
         out.append(Note(rel, p.stat().st_mtime))
     return sorted(out, key=lambda n: -n.mtime)
 

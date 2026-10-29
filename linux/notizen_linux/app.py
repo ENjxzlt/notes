@@ -17,7 +17,8 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from . import config as cfgmod  # noqa: E402
 from . import dash  # noqa: E402
-from . import nav  # noqa: E402
+from . import ideas_ui, nav  # noqa: E402
+from . import inbox  # noqa: E402
 from .sync import AuthError, Client, ServerError, Syncer, sha256  # noqa: E402
 
 APP_ID = os.environ.get('NOTIZEN_APP_ID', 'online.minihomelab.NotizenLinux')  # Tests nehmen eine eigene ID, damit sie nicht an eine laufende Instanz weiterleiten
@@ -188,6 +189,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.hist: list[tuple[str, str]] = []  # Zurück/Vor: ('n', Notiz) oder ('a', Bereich)
         self.hi, self._nav_lock, self._pin_lock = -1, False, False
         self._text_cache: dict[str, tuple[float, str]] = {}
+        self.istate = {'idx': 0, 'area': 'Schule', 'min': 45, 'due': '', 'filter': ''}  # Zustand der Inbox-Durchsicht und Aufgaben
         self._build()
         self.worker = Worker(self.syncer, self.on_report, self.on_status)
         self.worker.start()
@@ -215,6 +217,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._action('sync', self.request_sync, '<Control>r')
         self._action('settings', self.open_settings)
         self._action('delete', self.delete_note)
+        self._action('capture', self.open_capture, '<Control><Alt>i')
         self._action('quick', self.open_quick, '<Control>k')
         self._action('back', lambda: self.step_hist(-1), '<Alt>Left')
         self._action('forward', lambda: self.step_hist(1), '<Alt>Right')
@@ -249,12 +252,19 @@ class MainWindow(Adw.ApplicationWindow):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.nav = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE, margin_start=8, margin_end=8, margin_top=6)
         self.nav.add_css_class('navigation-sidebar')
-        for name, area in (('Übersicht', ''), ('Schule', 'Schule'), ('Projekte', 'Projekte'), ('Alltag', 'Alltag')):
+        for name, area, icon in (
+            ('Übersicht', '', 'view-grid-symbolic'), ('Inbox', '!ideen', 'mail-inbox-symbolic'),
+            ('Aufgaben', '!aufgaben', 'object-select-symbolic'), ('Rückblick', '!rueckblick', 'x-office-calendar-symbolic'),
+            ('Schule', 'Schule', 'folder-symbolic'), ('Projekte', 'Projekte', 'folder-symbolic'), ('Alltag', 'Alltag', 'folder-symbolic'),
+        ):
             row = Gtk.ListBoxRow()
             row.area = area
             b = Gtk.Box(spacing=10, margin_top=6, margin_bottom=6)
-            b.append(Gtk.Image(icon_name='view-grid-symbolic' if not area else 'folder-symbolic'))
-            b.append(label(name))
+            b.append(Gtk.Image(icon_name=icon))
+            b.append(Gtk.Label(label=name, xalign=0, hexpand=True))
+            row.count = label('', ['kbd'])
+            row.count.set_visible(False)
+            b.append(row.count)
             row.set_child(b)
             self.nav.append(row)
         self.nav.connect('row-activated', lambda _l, r: self.show_area(r.area))
@@ -373,10 +383,11 @@ class MainWindow(Adw.ApplicationWindow):
         row = None
         if self.current is not None and not area:
             top = None
-        for i in range(4):
-            r = self.nav.get_row_at_index(i)
+        i = 0
+        while (r := self.nav.get_row_at_index(i)) is not None:
             if top is not None and r.area == top:
                 row = r
+            i += 1
         if row:
             self.nav.select_row(row)
         else:
@@ -387,10 +398,11 @@ class MainWindow(Adw.ApplicationWindow):
         self.area, self.current = area, None
         self._tools_visible(False)
         self.title_stack.set_visible_child_name('title')
-        self.title.set_title(area.split('/')[-1] if area else 'Übersicht')
-        self.title.set_subtitle(area + '/' if area else datetime.now().strftime('%A, %d. %B').upper())
+        special = area.startswith('!')
+        self.title.set_title(ideas_ui.SPECIAL[area] if special else area.split('/')[-1] if area else 'Übersicht')
+        self.title.set_subtitle('' if special else area + '/' if area else datetime.now().strftime('%A, %d. %B').upper())
         self._select_nav(area)
-        if self._reveal(area + '/x' if area else ''):
+        if not special and self._reveal(area + '/x' if area else ''):
             GLib.idle_add(self._idle_tree)  # nicht mitten im Auswahl-Signal des Baums neu aufbauen
         self._render_side()
         self.build_dash()
@@ -464,6 +476,10 @@ class MainWindow(Adw.ApplicationWindow):
         box = self.dash_box
         while (c := box.get_first_child()):
             box.remove(c)
+        if self.area.startswith('!'):
+            ideas_ui.build(self, box, self.area)
+            self._update_counts()
+            return
         notes = dash.scan(self.root)
         scoped = [n for n in notes if dash.in_area(n.path, self.area)]
         tasks = dash.tasks_of(self.root, scoped)
@@ -472,6 +488,10 @@ class MainWindow(Adw.ApplicationWindow):
         head.append(label((self.area + '/') if self.area else datetime.now().strftime('%d.%m.%Y'), ['eyebrow']))
         head.append(label(self.area.split('/')[-1] if self.area else 'Übersicht', ['title-1']))
         box.append(head)
+        box.append(ideas_ui.capture_card(self))
+        if not self.area and (card := ideas_ui.inbox_card(self)):
+            box.append(card)
+        self._update_counts()
 
         groups = dash.folders(scoped, self.area)
         if groups:
@@ -659,6 +679,47 @@ class MainWindow(Adw.ApplicationWindow):
             cfgmod.save_nav({'pins': self.pins, 'recents': self.recents})
         except OSError:
             pass  # Pins und Verlauf sind Komfort, kein Grund für einen Fehler
+
+    def toast(self, msg: str):
+        self.toasts.add_toast(Adw.Toast(title=msg, timeout=4))
+
+    def _update_counts(self):
+        n_ideas, n_tasks = ideas_ui.counts(self)
+        i = 0
+        while (r := self.nav.get_row_at_index(i)) is not None:
+            n = n_ideas if r.area == '!ideen' else n_tasks if r.area == '!aufgaben' else 0
+            r.count.set_text(str(n))
+            r.count.set_visible(n > 0)
+            i += 1
+
+    def after_ideas_change(self):
+        """Nach Festhalten, Sortieren oder Abhaken: Listen, Zähler und aktuelle Seite neu zeichnen und abgleichen."""
+        self.request_sync(delay=800)
+        self.refresh_tree()
+        if self.current is None:
+            self.build_dash()
+        else:
+            self._update_counts()
+
+    def open_capture(self):
+        """Strg+Alt+I: kleines Fenster zum schnellen Festhalten über der App."""
+        dlg = Adw.Dialog(title='Idee festhalten', content_width=560)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_start=18, margin_end=18, margin_top=18, margin_bottom=18)
+        entry = Gtk.Entry(placeholder_text='Idee festhalten …')
+        entry.set_size_request(-1, 48)
+        box.append(entry)
+        box.append(label('Landet in der Inbox. ↵ festhalten, Esc schließen.', ['caption', 'dim-label']))
+
+        def submit(*_):
+            if inbox.add_idea(self.root, entry.get_text()):
+                dlg.close()
+                self.toast('Festgehalten')
+                self.after_ideas_change()
+
+        entry.connect('activate', submit)
+        dlg.set_child(box)
+        dlg.set_focus(entry)
+        dlg.present(self)
 
     def _render_side(self):
         exists = lambda p: (self.root / p).is_file()  # noqa: E731

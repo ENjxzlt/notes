@@ -29,6 +29,11 @@ Exec=$bin/notizen-linux
 Icon=accessories-text-editor
 Categories=Office;TextEditor;
 StartupWMClass=online.minihomelab.NotizenLinux
+Actions=Capture;
+
+[Desktop Action Capture]
+Name=Idee festhalten
+Exec=$bin/notizen-linux capture
 EOF
 
 echo "Fertig. Starten mit: notizen-linux (oder im Anwendungsmenü: Notizen)"

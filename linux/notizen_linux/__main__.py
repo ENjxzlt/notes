@@ -30,6 +30,10 @@ def cli_sync() -> int:
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == 'sync':
         sys.exit(cli_sync())
+    if len(sys.argv) > 1 and sys.argv[1] == 'capture':  # kleines Fenster zum schnellen Festhalten, z. B. per Tastenkürzel des Desktops
+        from .ideas_ui import run_capture
+
+        sys.exit(run_capture())
     from .app import main
 
     sys.exit(main())

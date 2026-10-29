@@ -14,6 +14,15 @@ beim nächsten Abgleich wird nachgeholt. Der Ordner lässt sich auch mit jedem a
 - Löschen wird weitergegeben; war eine Notiz lokal geändert und auf dem Server gelöscht, bleibt die lokale Fassung und geht neu hoch.
 - Zeichnungen (`.ink`-Ordner) werden mit abgeglichen, aber nicht angezeigt oder bearbeitet.
 
+## Ideen-Dump
+- Eingabezeile „Idee festhalten“ oben in Übersicht und Bereichen, in der App außerdem **Strg+Alt+I**. Ideen landen als Zeilen in `Inbox.md`
+  (`- 2026-10-29 12:31 · Text`) und werden wie alle Notizen abgeglichen.
+- **Globales Tastenkürzel:** `notizen-linux capture` öffnet ein kleines Fenster, auch wenn die App zu ist. In den Systemeinstellungen
+  (KDE: Kurzbefehle → Benutzerdefiniert) ein Kürzel auf diesen Befehl legen. Der Eintrag „Idee festhalten“ steht auch im Menü.
+- **Inbox** (Wochendurchsicht): Idee für Idee zur Aufgabe machen (Bereich, Dauer, Frist wie „Freitag“), als Notiz ablegen, auf später schieben
+  oder löschen. **Aufgaben** zeigt alle `- [ ]` aus allen Notizen mit Dauer und Frist, Abhaken schreibt `- [x]`. **Rückblick** fasst die Woche zusammen.
+- Format der Aufgaben: `- [ ] Titel (~45 min · bis 30.10.)`. Foto, Sprache und Skizze gibt es hier nicht (nur in Web und App).
+
 ## Installieren
 Voraussetzung: Python 3.11+, GTK 4, libadwaita 1.5+ und PyGObject (Arch: `python-gobject gtk4 libadwaita`).
 
