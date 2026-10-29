@@ -1,5 +1,6 @@
 import { renderMarkdown, esc } from './md.js';
-import { dashHtml, openTasks } from './dash.js';
+import { dashHtml, openTasks, when } from './dash.js';
+import { folderCounts, folderPeers, pager, crumbs, pushRecent, togglePin, prune, search, titleOf } from './nav.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -71,7 +72,44 @@ const mdFiles = () => [...files.keys()].filter((p) => p.endsWith('.md')).sort((a
 
 const openFolders = new Set(JSON.parse(localStorage.getItem('notizen-open') || '[]'));
 let current = null; // { path, rev, base }
-let query = '';
+
+const load = (key) => {
+  try {
+    const v = JSON.parse(localStorage.getItem(key) || '[]');
+    return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+};
+const store = (key, v) => localStorage.setItem(key, JSON.stringify(v));
+let pins = load('notizen-pins'); // angepinnte Notizen (nur in diesem Browser)
+let recents = load('notizen-recent'); // zuletzt geöffnete Notizen
+
+/** Klappt alle Ordner über `path` auf, damit die Notiz im Baum sichtbar ist. */
+function reveal(path) {
+  for (let d = dirOf(path); d; d = dirOf(d)) openFolders.add(d);
+  store('notizen-open', [...openFolders]);
+}
+
+function renderSide() {
+  pins = prune(pins, (p) => files.has(p));
+  recents = prune(recents, (p) => files.has(p));
+  const sec = (title, list, ico) =>
+    list.length
+      ? `<div class="side-label">${title}</div>${list
+          .map((p) => `<button type="button" class="row item${current?.path === p ? ' sel' : ''}" data-note="${esc(p)}"><span class="ico">${ico}</span><span class="name">${esc(titleOf(p))}</span><span class="meta">${esc(dirOf(p).split('/').pop())}</span></button>`)
+          .join('')}`
+      : '';
+  $('#pins').innerHTML = sec('Angepinnt', pins, '★');
+  $('#recents').innerHTML = sec('Zuletzt geöffnet', recents.filter((p) => !pins.includes(p)).slice(0, 4), '◷');
+}
+
+for (const id of ['#pins', '#recents']) {
+  $(id).addEventListener('click', (e) => {
+    const n = e.target.closest('[data-note]');
+    if (n) openNote(n.dataset.note);
+  });
+}
 
 function buildTree(paths) {
   const root = { folders: new Map(), notes: [] };
@@ -89,20 +127,21 @@ function buildTree(paths) {
 
 function renderTree() {
   const box = $('#tree');
-  const q = query.trim().toLowerCase();
-  let paths = mdFiles();
-  if (q) paths = paths.filter((p) => p.toLowerCase().includes(q));
+  const paths = mdFiles();
+  renderSide();
   if (!paths.length) {
-    box.innerHTML = `<div class="none">${q ? 'Nichts gefunden.' : 'Noch keine Notizen.'}</div>`;
+    box.innerHTML = '<div class="none">Noch keine Notizen.</div>';
     return;
   }
+  const counts = folderCounts(paths);
   const row = (cls, ico, name, meta, attrs) => `<button type="button" class="row ${cls}" ${attrs}><span class="ico">${ico}</span><span class="name">${esc(name)}</span>${meta ? `<span class="meta">${esc(meta)}</span>` : ''}</button>`;
   const walk = (node, prefix) => {
     let html = '<ul>';
     for (const [name, child] of [...node.folders].sort((a, b) => a[0].localeCompare(b[0], 'de'))) {
       const full = prefix ? `${prefix}/${name}` : name;
-      const open = q || openFolders.has(full);
-      html += `<li>${row('folder', open ? '▾' : '▸', name, '', `data-folder="${esc(full)}"`)}${open ? walk(child, full) : ''}</li>`;
+      const open = openFolders.has(full);
+      const here = dashOn && area === full ? ' sel' : '';
+      html += `<li>${row(`folder${here}`, open ? '▾' : '▸', name, String(counts.get(full) || 0), `data-folder="${esc(full)}" aria-expanded="${open}"`)}${open ? walk(child, full) : ''}</li>`;
     }
     for (const p of node.notes.sort((a, b) => a.localeCompare(b, 'de'))) {
       const name = p.split('/').pop().replace(/\.md$/, '');
@@ -127,10 +166,6 @@ $('#tree').addEventListener('click', (e) => {
   if (n) openNote(n.dataset.note);
 });
 
-$('#search').addEventListener('input', (e) => {
-  query = e.target.value;
-  renderTree();
-});
 
 // ---------- Notiz öffnen, anzeigen, speichern ----------
 
@@ -158,14 +193,126 @@ async function openNote(path) {
   $('#note').hidden = false;
   $('#banner').hidden = true;
   $('#app').classList.add('reading');
-  const parts = path.replace(/\.md$/, '').split('/');
-  $('#crumb').innerHTML = parts.map((p, i) => (i === parts.length - 1 ? `<strong>${esc(p)}</strong>` : esc(p))).join(' › ');
   setStatus('');
+  reveal(path);
+  recents = pushRecent(recents, path);
+  store('notizen-recent', recents);
   renderPreview();
   renderTree();
+  renderNoteNav();
   updateNav();
   history.replaceState(null, '', `#${encodeURIComponent(path)}`);
+  record({ t: 'n', p: path });
 }
+
+// ---------- Pfad, Blättern, Pins, Verlauf ----------
+
+function renderNoteNav() {
+  const p = current.path;
+  const cs = crumbs(p);
+  const parts = cs.map((c, i) =>
+    i === cs.length - 1
+      ? `<button type="button" class="crumb-btn" data-sib="${esc(c.path)}" aria-haspopup="true" aria-expanded="false">${esc(c.label)} ▾</button>`
+      : `<button type="button" class="crumb-btn" data-go="${esc(c.path)}">${esc(c.label)}</button>`,
+  );
+  $('#crumb').innerHTML = `${parts.map((x) => `${x}<span class="crumb-sep">›</span>`).join('')}<strong class="crumb-title">${esc(titleOf(p))}</strong><div id="sibMenu" class="sib-menu" hidden></div>`;
+  const pg = pager(mdFiles(), p);
+  $('#pagerInfo').textContent = `${pg.index + 1} von ${pg.total} in ${pg.folder ? pg.folder.split('/').pop() : 'Notizen'}`;
+  for (const [id, target] of [['#prevBtn', pg.prev], ['#nextBtn', pg.next]]) {
+    const b = $(id);
+    b.disabled = !target;
+    b.dataset.path = target || '';
+    b.title = target ? titleOf(target) : '';
+  }
+  const pinned = pins.includes(p);
+  $('#pinBtn').classList.toggle('on', pinned);
+  $('#pinBtn').setAttribute('aria-pressed', String(pinned));
+  $('#pinBtn').title = pinned ? 'Nicht mehr anpinnen' : 'Anpinnen';
+}
+
+$('#crumb').addEventListener('click', (e) => {
+  const go = e.target.closest('[data-go]');
+  if (go) return showDash(go.dataset.go);
+  const sib = e.target.closest('[data-sib]');
+  const menu = $('#sibMenu');
+  if (sib && menu) {
+    const open = menu.hidden;
+    if (open) {
+      const folder = sib.dataset.sib;
+      menu.innerHTML = `<div class="side-label">Ordner in ${esc(dirOf(folder) ? dirOf(folder).split('/').pop() : 'Notizen')}</div>${folderPeers(mdFiles(), folder)
+        .map((f) => `<button type="button" class="sib-item${f.current ? ' on' : ''}" data-go="${esc(f.path)}"><span class="chk">${f.current ? '✓' : ''}</span><span class="grow">${esc(f.name)}</span><span class="meta">${f.count}</span></button>`)
+        .join('')}`;
+    }
+    menu.hidden = !open;
+    sib.setAttribute('aria-expanded', String(open));
+  }
+});
+
+document.addEventListener('click', (e) => {
+  const menu = $('#sibMenu');
+  if (menu && !menu.hidden && !e.target.closest('#crumb')) menu.hidden = true;
+});
+
+for (const id of ['#prevBtn', '#nextBtn']) {
+  $(id).addEventListener('click', () => {
+    const p = $(id).dataset.path;
+    if (p) openNote(p);
+  });
+}
+
+$('#pinBtn').addEventListener('click', () => {
+  if (!current) return;
+  const t = togglePin(pins, current.path);
+  pins = t.list;
+  store('notizen-pins', pins);
+  renderNoteNav();
+  renderSide();
+});
+
+// Zurück/Vor wie im Browser, aber innerhalb der App (Notizen und Bereiche)
+const hist = [];
+let hi = -1;
+let navLock = false;
+
+function updateHist() {
+  $('#backBtn').disabled = hi <= 0;
+  $('#fwdBtn').disabled = hi >= hist.length - 1;
+}
+
+function record(e) {
+  if (navLock) return;
+  const top = hist[hi];
+  if (top && top.t === e.t && top.p === e.p) return;
+  hist.splice(hi + 1);
+  hist.push(e);
+  if (hist.length > 50) hist.shift();
+  hi = hist.length - 1;
+  updateHist();
+}
+
+async function stepHist(d) {
+  const i = hi + d;
+  if (i < 0 || i >= hist.length) return;
+  const e = hist[i];
+  if (e.t === 'n' && !files.has(e.p)) {
+    hist.splice(i, 1); // Notiz gibt es nicht mehr
+    if (d < 0) hi--;
+    updateHist();
+    return stepHist(d);
+  }
+  navLock = true;
+  hi = i;
+  try {
+    if (e.t === 'n') await openNote(e.p);
+    else await showDash(e.p);
+  } finally {
+    navLock = false;
+    updateHist();
+  }
+}
+
+$('#backBtn').addEventListener('click', () => stepHist(-1));
+$('#fwdBtn').addEventListener('click', () => stepHist(1));
 
 let previewTimer = null;
 function renderPreview() {
@@ -374,14 +521,18 @@ $('#newBtn').addEventListener('click', async () => {
   if (!p) return;
   p += '.md';
   if (files.has(p)) return alert('Diese Notiz gibt es schon.');
+  await createNote(p);
+});
+
+async function createNote(p) {
+  if (files.has(p)) return openNote(p);
   const title = p.split('/').pop().replace(/\.md$/, '');
   const r = await api('PUT', `/api/file?path=${encodeURIComponent(p)}&base=0`, `# ${title}\n\n`);
   if (!r.ok) return alert(`Konnte nicht angelegt werden (${r.status})`);
   files.set(p, await r.json());
-  for (let d = dirOf(p); d; d = dirOf(d)) openFolders.add(d);
   await openNote(p);
   editor.focus();
-});
+}
 
 $('#deleteBtn').addEventListener('click', async () => {
   if (!current) return;
@@ -446,7 +597,10 @@ async function loadTasks() {
         const rev = files.get(p)?.rev;
         try {
           const r = await api('GET', `/api/file?path=${encodeURIComponent(p)}`);
-          if (r.ok) taskCache.set(p, { rev, list: openTasks(await r.text()) });
+          if (r.ok) {
+            const text = await r.text();
+            taskCache.set(p, { rev, list: openTasks(text), text }); // der Text dient auch der Suche im Schnellwechsel
+          }
         } catch {
           /* bleibt ohne Aufgaben, bis zum nächsten Abgleich */
         }
@@ -467,10 +621,120 @@ async function showDash(a = '') {
   $('#dash').hidden = false;
   $('#app').classList.add('reading');
   history.replaceState(null, '', a ? `#@${encodeURIComponent(a)}` : '#');
+  reveal(`${a}/x`);
   drawDash();
   renderTree();
   loadTasks();
+  record({ t: 'a', p: a });
 }
+
+// ---------- Schnellwechsel (Strg+K) ----------
+
+let qsOpen = false;
+let qsScope = '';
+let qsItems = [];
+let qsSel = 0;
+const SCOPES = ['', 'Schule', 'Projekte', 'Alltag'];
+
+function openQs() {
+  if ($('#app').hidden) return;
+  qsOpen = true;
+  qsScope = '';
+  qsSel = 0;
+  $('#qs').hidden = false;
+  $('#qsInput').value = '';
+  renderQs();
+  $('#qsInput').focus();
+  loadTasks(); // holt die Texte für die Suche im Inhalt
+}
+
+function closeQs() {
+  qsOpen = false;
+  $('#qs').hidden = true;
+}
+
+function renderQs() {
+  const raw = $('#qsInput').value;
+  const q = raw.trim();
+  for (const b of $$('#qsChips [data-scope]')) b.classList.toggle('on', b.dataset.scope === qsScope);
+  const hits = search({ paths: mdFiles(), mtime: (p) => files.get(p).mtime, text: (p) => taskCache.get(p)?.text, query: raw, scope: qsScope });
+  qsItems = hits.map((h) => ({ ...h, run: () => (h.kind === 'folder' ? showDash(h.path) : openNote(h.path)) }));
+  if (q && !q.startsWith('/')) {
+    const base = qsScope || (current ? dirOf(current.path) : area);
+    const rel = clean(q).replace(/\.md$/, '');
+    const target = rel ? `${q.includes('/') || !base ? rel : `${base}/${rel}`}.md` : '';
+    if (target) qsItems.push({ kind: 'create', title: q, path: target, run: () => createNote(target) });
+  }
+  qsSel = Math.max(0, Math.min(qsSel, qsItems.length - 1));
+  const mark = (parts, fallback) => (parts ? `${esc(parts[0])}<mark>${esc(parts[1])}</mark>${esc(parts[2])}` : esc(fallback));
+  let html = '';
+  let last = '';
+  qsItems.forEach((it, i) => {
+    const group = it.kind === 'create' ? 'Aktionen' : it.kind === 'folder' ? 'Ordner' : q ? 'Notizen' : 'Zuletzt geändert';
+    if (group !== last) html += `<div class="side-label">${group}</div>`;
+    last = group;
+    const sel = i === qsSel ? ' sel' : '';
+    if (it.kind === 'create') {
+      html += `<button type="button" class="qs-row${sel}" role="option" aria-selected="${i === qsSel}" data-i="${i}"><span class="qs-ico">+</span><span class="qs-main"><span class="qs-title">Neue Notiz „${esc(it.title)}“ anlegen</span><span class="qs-path">${esc(it.path)}</span></span><kbd>Strg ↵</kbd></button>`;
+    } else {
+      const meta = it.kind === 'folder' ? `${it.count} Notizen` : when(it.mtime);
+      const via = it.via === 'text' ? '<span class="chip">im Text</span>' : '';
+      html += `<button type="button" class="qs-row${sel}" role="option" aria-selected="${i === qsSel}" data-i="${i}"><span class="qs-ico">${it.kind === 'folder' ? '▸' : '·'}</span><span class="qs-main"><span class="qs-title">${mark(it.parts, it.title)}</span><span class="qs-path">${esc(it.kind === 'folder' ? it.path : it.path)}</span></span>${via}${it.area ? `<span class="chip">${esc(it.area)}</span>` : ''}<span class="when">${esc(meta)}</span></button>`;
+    }
+  });
+  $('#qsList').innerHTML = html || '<div class="none">Nichts gefunden.</div>';
+  $('#qsList .qs-row.sel')?.scrollIntoView({ block: 'nearest' });
+}
+
+function runQs(i) {
+  const it = qsItems[i];
+  if (!it) return;
+  closeQs();
+  it.run();
+}
+
+$('#qsBtn').addEventListener('click', openQs);
+$('#qs').addEventListener('click', (e) => {
+  if (e.target === $('#qs')) return closeQs();
+  const row = e.target.closest('[data-i]');
+  if (row) return runQs(Number(row.dataset.i));
+  const chip = e.target.closest('[data-scope]');
+  if (chip) {
+    qsScope = chip.dataset.scope;
+    qsSel = 0;
+    renderQs();
+    $('#qsInput').focus();
+  }
+});
+$('#qsInput').addEventListener('input', () => {
+  qsSel = 0;
+  renderQs();
+});
+$('#qsInput').addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    qsSel = Math.max(0, Math.min(qsItems.length - 1, qsSel + (e.key === 'ArrowDown' ? 1 : -1)));
+    renderQs();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    const create = qsItems.findIndex((it) => it.kind === 'create');
+    runQs(e.ctrlKey || e.metaKey ? create : qsSel);
+  } else if (e.key === 'Tab') {
+    e.preventDefault();
+    qsScope = SCOPES[(SCOPES.indexOf(qsScope) + (e.shiftKey ? SCOPES.length - 1 : 1)) % SCOPES.length];
+    qsSel = 0;
+    renderQs();
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    if (qsOpen) closeQs();
+    else openQs();
+  } else if (e.key === 'Escape' && qsOpen) {
+    closeQs();
+  }
+});
 
 $('#dash').addEventListener('click', (e) => {
   const go = e.target.closest('[data-go]');
