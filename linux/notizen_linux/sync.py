@@ -19,6 +19,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
+USER_AGENT = 'notizen-linux/0.1'
 MAX_SIZE = 25 * 1024 * 1024
 ALLOWED_EXT = {'.md', '.json', '.svg'}
 
@@ -73,7 +74,8 @@ class Client:
         url = f'{self.base}{path}'
         if params:
             url += '?' + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url, data=body, method=method, headers={'Authorization': f'Bearer {self.token}'})
+        # Eigener User-Agent: Cloudflare sperrt den Standardwert von Python („Python-urllib“, Fehler 1010 / HTTP 403)
+        req = urllib.request.Request(url, data=body, method=method, headers={'Authorization': f'Bearer {self.token}', 'User-Agent': USER_AGENT})
         return urllib.request.urlopen(req, timeout=timeout or self.timeout)
 
     def _call(self, method, path, params=None, body=None):

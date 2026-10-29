@@ -106,7 +106,7 @@ class Worker:
 
 class SetupWindow(Adw.Window):
     def __init__(self, app, cfg: cfgmod.Config, parent=None, on_done=None):
-        super().__init__(title='Mit dem Notizen-Server verbinden', modal=bool(parent), default_width=480)
+        super().__init__(application=app, title='Mit dem Notizen-Server verbinden', modal=bool(parent), default_width=480, default_height=520)
         if parent:
             self.set_transient_for(parent)
         self.app, self.on_done = app, on_done
